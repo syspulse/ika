@@ -1,10 +1,13 @@
 package io.syspulse.ika.processor.rpc3
 
+import java.nio.file.Paths
+
 import org.scalatest.wordspec.AnyWordSpec
 import org.scalatest.matchers.should.Matchers
 import org.scalatest.concurrent.ScalaFutures
 import scala.concurrent.{Future, ExecutionContext}
 import scala.concurrent.duration._
+import scala.io.Source
 import spray.json._
 
 import akka.actor.ActorSystem
@@ -20,6 +23,16 @@ class CacheRpc3BatchSpec extends AnyWordSpec with Matchers with ScalaFutures {
   // Keep tests snappy
   implicit override val patienceConfig: PatienceConfig =
     PatienceConfig(timeout = 3.seconds, interval = 25.millis)
+
+  /** Project `test/` directory (see `build.sbt` / `-Duser.dir` for runs). */
+  private val testDir = Paths.get(System.getProperty("user.dir"), "test")
+
+  private def loadTestFixture(name: String): String =
+    Source.fromFile(testDir.resolve(name).toFile, "UTF-8").mkString.trim
+
+  /** Canonical JSON string for stable equality on real RPC fixtures. */
+  private def jsonCanon(s: String): String =
+    s.parseJson.compactPrint
 
   def mkReq(id: Int, method: String = "eth_test", params: String = "[]"): String =
     s"""{"jsonrpc":"2.0","method":"${method}","params":${params},"id":${id}}"""
@@ -323,6 +336,162 @@ class CacheRpc3BatchSpec extends AnyWordSpec with Matchers with ScalaFutures {
       runCase(allIds = Vector(10, 11, 12, 13, 14, 15), cachedIds = Set(10, 12, 14))
       // All cached (no http)
       runCase(allIds = Vector(21, 22), cachedIds = Set(21, 22))
+    }
+  }
+
+  /**
+   * Real captured JSON-RPC responses under `test/RSP*.json`, paired with matching requests.
+   * Bodies are compared after `parseJson.compactPrint` so formatting differences do not matter.
+   */
+  "CacheRpc3Processor (test/ RSP*.json fixtures)" should {
+
+    "cache single eth_getBlockByNumber(latest) using REQ_latest.json + RSP_1.json" in {
+      val cache = CacheRpc3Processor.expire(ttl = 30000L)
+      val rsp = loadTestFixture("RSP_1.json")
+      val req = loadTestFixture("REQ_latest.json")
+      var httpCalls = 0
+
+      val http = new HttpClientProcessor(compression = "") {
+        override def processRequest(session: Session): Future[Session] = {
+          httpCalls += 1
+          Future.successful(session.withResponse(rsp, ProxyData.REMOTE))
+        }
+      }
+
+      val pipeline = ProcessorPipeline.fromSeq(Seq(cache, http, cache), "TestPipeline")
+
+      val r1 = pipeline.process(Session(requestBody = req)).futureValue
+      r1.responseSource shouldBe ProxyData.REMOTE
+      jsonCanon(r1.responseBody.get) shouldBe jsonCanon(rsp)
+      httpCalls shouldBe 1
+
+      val r2 = pipeline.process(Session(requestBody = req)).futureValue
+      r2.responseSource shouldBe ProxyData.CACHE
+      jsonCanon(r2.responseBody.get) shouldBe jsonCanon(rsp)
+      httpCalls shouldBe 1
+    }
+
+    "cache eth_blockNumber using REQ_eth_blockNumber_latest.json + RSP_eth_blockNumber.json" in {
+      val cache = CacheRpc3Processor.expire(ttl = 30000L)
+      val rsp = loadTestFixture("RSP_eth_blockNumber.json")
+      val req = loadTestFixture("REQ_eth_blockNumber_latest.json")
+      var httpCalls = 0
+
+      val http = new HttpClientProcessor(compression = "") {
+        override def processRequest(session: Session): Future[Session] = {
+          httpCalls += 1
+          Future.successful(session.withResponse(rsp, ProxyData.REMOTE))
+        }
+      }
+
+      val pipeline = ProcessorPipeline.fromSeq(Seq(cache, http, cache), "TestPipeline")
+
+      val r1 = pipeline.process(Session(requestBody = req)).futureValue
+      r1.responseSource shouldBe ProxyData.REMOTE
+      jsonCanon(r1.responseBody.get) shouldBe jsonCanon(rsp)
+      httpCalls shouldBe 1
+
+      val r2 = pipeline.process(Session(requestBody = req)).futureValue
+      r2.responseSource shouldBe ProxyData.CACHE
+      httpCalls shouldBe 1
+    }
+
+    "cache batch item using RSP_Batch_1.json (request id aligned with fixture)" in {
+      val cache = CacheRpc3Processor.expire(ttl = 30000L)
+      val rsp = loadTestFixture("RSP_Batch_1.json")
+      val req =
+        """[{"jsonrpc":"2.0","method":"eth_getBlockByNumber","params":["latest", false],"id":1}]"""
+      var httpCalls = 0
+
+      val http = new HttpClientProcessor(compression = "") {
+        override def processRequest(session: Session): Future[Session] = {
+          httpCalls += 1
+          Future.successful(session.withResponse(rsp, ProxyData.REMOTE))
+        }
+      }
+
+      val pipeline = ProcessorPipeline.fromSeq(Seq(cache, http, cache), "TestPipeline")
+
+      val r1 = pipeline.process(Session(requestBody = req)).futureValue
+      r1.responseSource shouldBe ProxyData.REMOTE
+      jsonCanon(r1.responseBody.get) shouldBe jsonCanon(rsp)
+      httpCalls shouldBe 1
+
+      val r2 = pipeline.process(Session(requestBody = req)).futureValue
+      r2.responseSource shouldBe ProxyData.CACHE
+      httpCalls shouldBe 1
+    }
+
+    "cache batch item using RSP_Batch_2.json (id 2)" in {
+      val cache = CacheRpc3Processor.expire(ttl = 30000L)
+      val rsp = loadTestFixture("RSP_Batch_2.json")
+      val req =
+        """[{"jsonrpc":"2.0","method":"eth_getBlockByNumber","params":["latest", false],"id":2}]"""
+      var httpCalls = 0
+
+      val http = new HttpClientProcessor(compression = "") {
+        override def processRequest(session: Session): Future[Session] = {
+          httpCalls += 1
+          Future.successful(session.withResponse(rsp, ProxyData.REMOTE))
+        }
+      }
+
+      val pipeline = ProcessorPipeline.fromSeq(Seq(cache, http, cache), "TestPipeline")
+
+      val r1 = pipeline.process(Session(requestBody = req)).futureValue
+      jsonCanon(r1.responseBody.get) shouldBe jsonCanon(rsp)
+      httpCalls shouldBe 1
+
+      val r2 = pipeline.process(Session(requestBody = req)).futureValue
+      r2.responseSource shouldBe ProxyData.CACHE
+      httpCalls shouldBe 1
+    }
+
+    "not cache single error response (RSP_error_32000.json); second request hits HTTP again" in {
+      val cache = CacheRpc3Processor.expire(ttl = 30000L)
+      val rsp = loadTestFixture("RSP_error_32000.json")
+      val req = """{"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":0}"""
+      var httpCalls = 0
+
+      val http = new HttpClientProcessor(compression = "") {
+        override def processRequest(session: Session): Future[Session] = {
+          httpCalls += 1
+          Future.successful(session.withResponse(rsp, ProxyData.REMOTE))
+        }
+      }
+
+      val pipeline = ProcessorPipeline.fromSeq(Seq(cache, http, cache), "TestPipeline")
+
+      val r1 = pipeline.process(Session(requestBody = req)).futureValue
+      r1.isRejected shouldBe false
+      jsonCanon(r1.responseBody.get) shouldBe jsonCanon(rsp)
+      httpCalls shouldBe 1
+
+      val r2 = pipeline.process(Session(requestBody = req)).futureValue
+      jsonCanon(r2.responseBody.get) shouldBe jsonCanon(rsp)
+      httpCalls shouldBe 2
+    }
+
+    "not cache batch error response (RSP_Batch_error_32000.json); second request hits HTTP again" in {
+      val cache = CacheRpc3Processor.expire(ttl = 30000L)
+      val rsp = loadTestFixture("RSP_Batch_error_32000.json")
+      val req = """[{"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":0}]"""
+      var httpCalls = 0
+
+      val http = new HttpClientProcessor(compression = "") {
+        override def processRequest(session: Session): Future[Session] = {
+          httpCalls += 1
+          Future.successful(session.withResponse(rsp, ProxyData.REMOTE))
+        }
+      }
+
+      val pipeline = ProcessorPipeline.fromSeq(Seq(cache, http, cache), "TestPipeline")
+
+      pipeline.process(Session(requestBody = req)).futureValue
+      httpCalls shouldBe 1
+
+      pipeline.process(Session(requestBody = req)).futureValue
+      httpCalls shouldBe 2
     }
   }
 }
