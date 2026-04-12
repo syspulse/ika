@@ -1,5 +1,7 @@
 package io.syspulse.ika.processor
 
+import java.util.Locale
+
 import akka.http.scaladsl.model.HttpHeader
 import io.syspulse.ika.store.ProxyData
 
@@ -8,7 +10,7 @@ import io.syspulse.ika.store.ProxyData
  *
  * The rejection is abstract and does not assume any specific format (JSON-RPC, REST, etc.).
  * A RejectionProcessor in the pipeline is responsible for converting the rejection
- * into an appropriate response format and setting the HTTP status code.
+ * into an appropriate response format and setting the HTTP response status code.
  *
  * @param code Error code (can be JSON-RPC code, HTTP status code, or custom code)
  * @param message Human-readable error message
@@ -35,29 +37,40 @@ case class Rejection(
  *
  * All processor-specific data (destination, pool, retry counters, timeouts, etc.)
  * should be stored in processorData.
+ *
+ * Request and response headers are stored as [[scala.collection.immutable.Map]] keyed by
+ * lower-cased field name ([[java.util.Locale.ROOT]]); each name appears at most once.
+ * [[requestHeaders]] / [[responseHeaders]] expose the current [[akka.http.scaladsl.model.HttpHeader]]s
+ * as a sequence (order is not specified).
  */
-case class Session(
+case class Session private[processor] (
   // Request data
   requestBody: String,
-  requestHeaders: Seq[HttpHeader] = Seq.empty,
+  requestHeaderMap: Map[String, HttpHeader],
 
   // Response data
-  responseBody: Option[String] = None,
-  responseHeaders: Seq[HttpHeader] = Seq.empty,
-  responseSource: ProxyData.Source = ProxyData.LOCAL,
+  responseBody: Option[String],
+  responseHeaderMap: Map[String, HttpHeader],
+  responseSource: ProxyData.Source,
 
   // Pipeline control
-  rejection: Option[Rejection] = None,
+  rejection: Option[Rejection],
 
   // Inter-processor communication
   // Processors can store/read arbitrary data here for downstream/upstream processors
   // Examples: "destination", "pool", "retry", "maxRetry", "timeoutMs", "cacheHit", etc.
-  processorData: Map[String, Any] = Map.empty,
+  processorData: Map[String, Any],
 
   // Timing data (for telemetry)
-  startTime: Long = System.currentTimeMillis(),
-  endTime: Option[Long] = None
+  startTime: Long,
+  endTime: Option[Long]
 ) {
+
+  /** All request headers (order not specified). */
+  def requestHeaders: Seq[HttpHeader] = requestHeaderMap.values.toSeq
+
+  /** All response headers (order not specified). */
+  def responseHeaders: Seq[HttpHeader] = responseHeaderMap.values.toSeq
 
   /**
    * Mark this session as rejected with given error details
@@ -93,17 +106,33 @@ case class Session(
   }
 
   /**
-   * Update request headers (for upstream processors to modify before HTTP)
+   * Replace request headers (built from a sequence: duplicate field names collapse, last wins).
    */
   def withRequestHeaders(headers: Seq[HttpHeader]): Session = {
-    copy(requestHeaders = headers)
+    copy(requestHeaderMap = Session.headersFromSeq(headers))
   }
 
   /**
-   * Add a request header (for upstream processors to add headers)
+   * Add or replace a request header (same field name as an existing header, any casing, is replaced).
    */
   def addRequestHeader(header: HttpHeader): Session = {
-    copy(requestHeaders = requestHeaders :+ header)
+    val k = Session.headerKey(header)
+    copy(requestHeaderMap = requestHeaderMap + (k -> header))
+  }
+
+  /**
+   * Remove a request header by field name (case-insensitive).
+   */
+  def removeRequestHeader(name: String): Session = {
+    copy(requestHeaderMap = requestHeaderMap - name.toLowerCase(Locale.ROOT))
+  }
+
+  /**
+   * Add or replace a response header (same field name as an existing header, any casing, is replaced).
+   */
+  def addResponseHeader(header: HttpHeader): Session = {
+    val k = Session.headerKey(header)
+    copy(responseHeaderMap = responseHeaderMap + (k -> header))
   }
 
   /**
@@ -113,7 +142,7 @@ case class Session(
     copy(
       responseBody = Some(body),
       responseSource = source,
-      responseHeaders = headers
+      responseHeaderMap = Session.headersFromSeq(headers)
     )
   }
 
@@ -154,4 +183,40 @@ case class Session(
       src = responseSource
     )
   }
+}
+
+object Session {
+
+  def headerKey(h: HttpHeader): String =
+    h.name.toLowerCase(Locale.ROOT)
+
+  /**
+   * Build a map keyed by lower-cased field name; if the same name appears multiple times in `headers`,
+   * the last occurrence wins (matching HTTP single-value field semantics for our store).
+   */
+  def headersFromSeq(headers: Seq[HttpHeader]): Map[String, HttpHeader] =
+    headers.map(h => headerKey(h) -> h).toMap
+
+  def apply(
+    requestBody: String,
+    requestHeaders: Seq[HttpHeader] = Seq.empty,
+    responseBody: Option[String] = None,
+    responseHeaders: Seq[HttpHeader] = Seq.empty,
+    responseSource: ProxyData.Source = ProxyData.LOCAL,
+    rejection: Option[Rejection] = None,
+    processorData: Map[String, Any] = Map.empty,
+    startTime: Long = System.currentTimeMillis(),
+    endTime: Option[Long] = None
+  ): Session =
+    new Session(
+      requestBody,
+      headersFromSeq(requestHeaders),
+      responseBody,
+      headersFromSeq(responseHeaders),
+      responseSource,
+      rejection,
+      processorData,
+      startTime,
+      endTime
+    )
 }

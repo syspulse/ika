@@ -47,6 +47,62 @@ class SessionSpec extends AnyWordSpec with Matchers {
       updated.responseHeaders shouldBe headers
     }
 
+    "update request body immutably for upstream/downstream processors" in {
+      val session = Session(requestBody = """{"id":1}""")
+      val rewritten = session.withRequestBody("""{"id":2}""")
+
+      session.requestBody shouldBe """{"id":1}"""
+      rewritten.requestBody shouldBe """{"id":2}"""
+    }
+
+    "replace request headers with withRequestHeaders" in {
+      val h1 = RawHeader("A", "1")
+      val h2 = RawHeader("B", "2")
+      val session = Session(requestBody = "x", requestHeaders = Seq(h1))
+      val replaced = session.withRequestHeaders(Seq(h2))
+
+      session.requestHeaders shouldBe Seq(h1)
+      replaced.requestHeaders shouldBe Seq(h2)
+    }
+
+    "append request headers with addRequestHeader" in {
+      val session = Session(requestBody = "x", requestHeaders = Seq(RawHeader("A", "1")))
+      val added = session.addRequestHeader(RawHeader("B", "2"))
+
+      added.requestHeaders.map(h => (h.name, h.value)).toSet shouldBe Set(("A", "1"), ("B", "2"))
+    }
+
+    "deduplicate request headers on construction (case-insensitive names; last wins)" in {
+      val s = Session(
+        requestBody = "x",
+        requestHeaders = Seq(
+          RawHeader("X-Token", "first"),
+          RawHeader("Other", "o"),
+          RawHeader("x-token", "second")
+        )
+      )
+      s.requestHeaderMap.size shouldBe 2
+      s.requestHeaderMap("other").value shouldBe "o"
+      s.requestHeaderMap("x-token").value shouldBe "second"
+    }
+
+    "replace request header when addRequestHeader uses the same field name (case-insensitive)" in {
+      val s0 = Session(requestBody = "x", requestHeaders = Seq(RawHeader("Authorization", "OLD")))
+      val s1 = s0.addRequestHeader(RawHeader("authorization", "NEW"))
+      s1.requestHeaders should have length 1
+      s1.requestHeaders.head.value shouldBe "NEW"
+    }
+
+    "deduplicate response headers in withResponse" in {
+      val s = Session(requestBody = "x").withResponse(
+        "{}",
+        ProxyData.REMOTE,
+        Seq(RawHeader("Vary", "*"), RawHeader("vary", "Origin"))
+      )
+      s.responseHeaders should have length 1
+      s.responseHeaders.head.value shouldBe "Origin"
+    }
+
     "store destination URL in processorData" in {
       val session = Session(requestBody = "test")
       val updated = session.putData("destination", "http://localhost:8545")
@@ -106,6 +162,21 @@ class SessionSpec extends AnyWordSpec with Matchers {
 
       original.getData[String]("destination") shouldBe None
       updated.getData[String]("destination") shouldBe Some("http://localhost:8545")
+    }
+  }
+
+  "Session.headersFromSeq" should {
+    "map duplicate field names to last value (case-insensitive key)" in {
+      val m = Session.headersFromSeq(
+        Seq(
+          RawHeader("X-Req", "a"),
+          RawHeader("Y", "y"),
+          RawHeader("x-req", "b")
+        )
+      )
+      m.size shouldBe 2
+      m("x-req").value shouldBe "b"
+      m("y").value shouldBe "y"
     }
   }
 
