@@ -86,6 +86,27 @@ case class Session(
   }
 
   /**
+   * Update request body (for upstream processors to modify before HTTP)
+   */
+  def withRequestBody(body: String): Session = {
+    copy(requestBody = body)
+  }
+
+  /**
+   * Update request headers (for upstream processors to modify before HTTP)
+   */
+  def withRequestHeaders(headers: Seq[HttpHeader]): Session = {
+    copy(requestHeaders = headers)
+  }
+
+  /**
+   * Add a request header (for upstream processors to add headers)
+   */
+  def addRequestHeader(header: HttpHeader): Session = {
+    copy(requestHeaders = requestHeaders :+ header)
+  }
+
+  /**
    * Set response data
    */
   def withResponse(body: String, source: ProxyData.Source = ProxyData.REMOTE, headers: Seq[HttpHeader] = Seq.empty): Session = {
@@ -94,6 +115,20 @@ case class Session(
       responseSource = source,
       responseHeaders = headers
     )
+  }
+
+  /**
+   * Set response body only
+   */
+  def withResponseBody(body: String): Session = {
+    copy(responseBody = Some(body))
+  }
+
+  /**
+   * Set response source
+   */
+  def withResponseSource(source: ProxyData.Source): Session = {
+    copy(responseSource = source)
   }
 
   /**

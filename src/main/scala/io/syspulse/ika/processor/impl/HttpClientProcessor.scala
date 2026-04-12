@@ -20,10 +20,16 @@ import io.syspulse.ika.store.ProxyData
  *
  * Features:
  * - Uses destination from session (set by LoadBalancerProcessor)
+ * - Uses request body and headers from session (can be modified by upstream processors)
  * - Respects timeout from session (set by TimeoutProcessor)
  * - Handles compression/decompression (gzip, deflate)
- * - Filters headers (removes Timeout-Access, Host)
+ * - Filters headers (removes Timeout-Access, Host - QuickNode rejects empty Host with 401)
  * - Sets response on session
+ *
+ * IMPORTANT: This processor uses session.requestBody and session.requestHeaders,
+ * which means upstream processors can modify the request before HTTP is sent.
+ * For example, a HeaderFilterProcessor could add/remove headers, or a
+ * BodyTransformProcessor could modify the request body.
  *
  * This is typically the last processor in the request chain before response processors.
  */
@@ -141,6 +147,8 @@ class HttpClientProcessor(
         val timeoutMs = session.getData[Long]("timeoutMs").getOrElse(10000L)
         log.info(s"${session.requestBody.take(85)} --> ${uri}")
 
+        // IMPORTANT: Use session.requestBody and session.requestHeaders
+        // These can be modified by upstream processors before reaching HTTP
         makeRequest(uri, session.requestBody, session.requestHeaders, timeoutMs)
           .map { responseBody =>
             session.withResponse(responseBody, ProxyData.REMOTE)
