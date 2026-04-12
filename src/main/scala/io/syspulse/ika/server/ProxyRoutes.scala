@@ -72,14 +72,13 @@ class ProxyRoutes(registry: ActorRef[Command])(implicit context: ActorContext[_]
   val metricGetCount: Counter = Counter.build().name("ika_get_total").help("ika gets").register(TelemetryRegistry.registry)
   val metricPostCount: Counter = Counter.build().name("ika_post_total").help("ika posts").register(TelemetryRegistry.registry)
   
-  def rpcProxy(req:String,headers:Seq[HttpHeader]): Future[Try[String]] = registry.ask(ProxyRpc(req,headers,_))
-      
+  def postProxy(req:String,headers:Seq[HttpHeader]): Future[Try[String]] = registry.ask(ProxyReq(req,headers,_))      
 
   @POST @Path("/") @Consumes(Array(MediaType.APPLICATION_JSON))
   def rpcRoute = post {
     extractRequest { request =>
       entity(as[String]) { req =>        
-        onSuccess(rpcProxy(req,request.headers)) { rsp =>
+        onSuccess(postProxy(req,request.headers)) { rsp =>
           metricPostCount.inc()
           complete(StatusCodes.OK, rsp)
         }

@@ -1,4 +1,4 @@
-package io.syspulse.ika.processor
+package io.syspulse.ika.processor.util
 
 import scala.concurrent.ExecutionContext
 import com.typesafe.scalalogging.Logger
@@ -6,6 +6,7 @@ import akka.actor.ActorSystem
 
 import io.syspulse.ika.processor.impl._
 import io.syspulse.ika.processor.uri.CacheURI
+import io.syspulse.ika.processor.{ProcessorPipeline}
 
 /**
  * PipelineBuilder constructs processor pipelines from configuration.
@@ -19,7 +20,7 @@ import io.syspulse.ika.processor.uri.CacheURI
  * Default pipeline for web3:
  * Throttle → Timeout → Cache → LoadBalancer → Retry[HttpClient] → JsonRpcRejection
  */
-class PipelineBuilder(
+class ProcessorPipelineBuilder(
   destinations: Seq[String],
   processorConfig: ProcessorConfig = ProcessorConfig.default,
   poolStrategy: String = "sticky",
@@ -162,13 +163,13 @@ class PipelineBuilder(
   }
 }
 
-object PipelineBuilder {
+object ProcessorPipelineBuilder {
   def apply(
     destinations: Seq[String],
     processorConfig: ProcessorConfig = ProcessorConfig.default,
     poolStrategy: String = "sticky",
     cacheUri: String = "rpc3://"
-  )(implicit ec: ExecutionContext, actorSystem: ActorSystem): PipelineBuilder = {
-    new PipelineBuilder(destinations, processorConfig, poolStrategy, cacheUri)(ec, actorSystem)
+  )(implicit ec: ExecutionContext, actorSystem: ActorSystem): ProcessorPipelineBuilder = {
+    new ProcessorPipelineBuilder(destinations, processorConfig, poolStrategy, cacheUri)(ec, actorSystem)
   }
 }

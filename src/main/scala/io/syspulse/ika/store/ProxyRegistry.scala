@@ -23,7 +23,7 @@ object ProxyRegistry {
 
   implicit val ec: scala.concurrent.ExecutionContext = scala.concurrent.ExecutionContext.global
     
-  final case class ProxyRpc(req:String,headers:Seq[HttpHeader],replyTo: ActorRef[Try[String]]) extends Command  
+  final case class ProxyReq(req:String,headers:Seq[HttpHeader],replyTo: ActorRef[Try[String]]) extends Command  
   
   def apply(store: ProxyStore): Behavior[io.syspulse.skel.Command] = {
     registry(store)
@@ -33,9 +33,9 @@ object ProxyRegistry {
     
     Behaviors.receiveMessage {
 
-      case ProxyRpc(req,headers,replyTo) =>
+      case ProxyReq(req,headers,replyTo) =>
         
-        val f: Future[ProxyData] = store.rpc(req,headers)
+        val f: Future[ProxyData] = store.proxy(req,headers)
         val b: Future[String] = f.map(r => r.body)
 
         b.onComplete(r => r match {

@@ -1,4 +1,4 @@
-package io.syspulse.ika.processor
+package io.syspulse.ika.processor.util
 
 /**
  * ProcessorConfig contains processor-specific configuration.

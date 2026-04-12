@@ -21,5 +21,5 @@ case class ProxyData(
 
 trait ProxyStore {
 
-  def rpc(req:String,headers:Seq[HttpHeader]):Future[ProxyData]
+  def proxy(req:String,headers:Seq[HttpHeader]):Future[ProxyData]
 }

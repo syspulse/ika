@@ -292,7 +292,7 @@ abstract class ProxyStoreRcp(pool:ProxyPool)(implicit config:Config) extends Pro
     } yield r1
   }
 
-  def rpc(req:String,headers:Seq[HttpHeader]) = {
+  def proxy(req:String,headers:Seq[HttpHeader]) = {
     log.debug(s"req='${req}', headers=${headers}")
 
     val session = pool.connect(req)

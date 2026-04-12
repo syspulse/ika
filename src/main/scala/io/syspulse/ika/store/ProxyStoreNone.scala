@@ -24,7 +24,7 @@ class ProxyStoreNone extends ProxyStore {
 
   import ProxyJson._
   
-  def rpc(req:String,headers:Seq[HttpHeader]) = {
+  def proxy(req:String,headers:Seq[HttpHeader]) = {
     log.info(s"req='${req}', headers=${headers}")
 
     val request = if(req.trim.startsWith("{")) {

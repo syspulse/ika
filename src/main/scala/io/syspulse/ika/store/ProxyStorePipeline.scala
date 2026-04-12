@@ -7,7 +7,9 @@ import akka.actor.ActorSystem
 import akka.http.scaladsl.model.HttpHeader
 
 import io.syspulse.ika.Config
-import io.syspulse.ika.processor.{Session, ProcessorPipeline, PipelineBuilder, ProcessorConfig}
+import io.syspulse.ika.processor.{Session, ProcessorPipeline}
+import io.syspulse.ika.processor.util.ProcessorConfig
+import io.syspulse.ika.processor.util.ProcessorPipelineBuilder
 
 /**
  * ProxyStorePipeline implements the ProxyStore trait using the processor pipeline architecture.
@@ -32,9 +34,9 @@ class ProxyStorePipeline(
   log.info(s"Pipeline: ${pipeline}")
 
   /**
-   * Process an RPC request through the pipeline
+   * process request
    */
-  def rpc(req: String, headers: Seq[HttpHeader]): Future[ProxyData] = {
+  def proxy(req: String, headers: Seq[HttpHeader]): Future[ProxyData] = {
     log.debug(s"Processing request: ${req.take(100)}...")
 
     // Create initial session
@@ -100,7 +102,7 @@ object ProxyStorePipeline {
    * Create a ProxyStorePipeline with a specific profile
    */
   def apply(profile: String)(implicit config: Config, ec: ExecutionContext, actorSystem: ActorSystem): ProxyStorePipeline = {
-    val builder = PipelineBuilder(
+    val builder = ProcessorPipelineBuilder(
       destinations = config.destinations,
       processorConfig = ProcessorConfig.default,
       poolStrategy = "sticky",

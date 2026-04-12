@@ -16,7 +16,9 @@ import akka.http.scaladsl.server.Directives._
 import akka.http.scaladsl.unmarshalling.Unmarshal
 import akka.stream.Materializer
 
-import io.syspulse.ika.processor.{PipelineBuilder, ProcessorConfig, ProcessorPipeline}
+import io.syspulse.ika.processor.{ProcessorPipeline}
+import io.syspulse.ika.processor.util.ProcessorPipelineBuilder
+import io.syspulse.ika.processor.util.ProcessorConfig
 import io.syspulse.ika.processor.impl.{
   HttpClientProcessor,
   LoadBalancerProcessor,
@@ -68,7 +70,7 @@ class ProxyPipelineHttpIntegrationSpec
     post {
       pathEndOrSingleSlash {
         entity(as[String]) { body =>
-          onSuccess(store.rpc(body, Nil)) { pd =>
+          onSuccess(store.proxy(body, Nil)) { pd =>
             complete(
               HttpResponse(
                 status = StatusCodes.OK,
@@ -86,7 +88,7 @@ class ProxyPipelineHttpIntegrationSpec
       cacheUri: String,
       poolStrategy: String = "sticky"
   ): ProxyStore = {
-    val builder = PipelineBuilder(
+    val builder = ProcessorPipelineBuilder(
       destinations = destinations,
       processorConfig = processorConfig,
       poolStrategy = poolStrategy,
