@@ -1,0 +1,89 @@
+package io.syspulse.ika.pool
+
+import scala.util.Try
+import scala.util.{Success,Failure}
+import scala.collection.immutable
+
+import scala.concurrent.ExecutionContext
+import java.util.concurrent.Executors
+
+import com.typesafe.scalalogging.Logger
+
+import io.jvm.uuid._
+import scala.concurrent.Future
+
+import io.syspulse.ika.Config
+
+class RpcSessionSticky(pool:Seq[String],maxRetry:Int = 3,maxLaps:Int = 1) extends ProxySession(pool) {
+  
+  var i = 0  
+  var r = maxRetry  
+  var l = 0
+  var i0 = i
+  
+  def next():String = this.synchronized( 
+    pool(i)
+  )
+
+  def failed():String = this.synchronized {
+    
+    if(r == 0) {
+      i = i + 1
+      r = maxRetry
+
+      if(i == i0) {
+        // overlap
+        l = l + 1
+      }
+    }
+
+    if(i == pool.size) {
+      i = 0
+      r = maxRetry
+      
+      if(i == i0) {
+        // overlap
+        l = l + 1
+      }
+    }    
+
+    val rpc = pool(i)
+
+    r = r - 1
+
+    rpc
+  }
+  
+  def available:Boolean = this.synchronized {
+    l < maxLaps
+  }  
+  
+  def retry = this.synchronized { r }
+
+  def lap = this.synchronized{ l }
+
+  def connect() = this.synchronized{
+    r = maxRetry
+    i0 = i
+    l = 0
+  }
+}
+
+
+class RpcPoolSticky(pool:Seq[String])(implicit config:Config) extends ProxyPool {
+  def pool():Seq[String] = pool
+  def connect(req:String) = {
+    sticky.connect()
+    sticky
+  }
+
+  // DEPRECATED: Use hardcoded defaults for legacy tests
+  private val rpcRetry = 3
+  private val rpcLaps = 1
+
+  // persistant pool
+  val sticky = new RpcSessionSticky(pool, rpcRetry, rpcLaps)
+
+  if(pool.size == 0)
+    throw new Exception(s"empty RPC pool")
+}

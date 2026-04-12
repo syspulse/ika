@@ -1,0 +1,108 @@
+#!/bin/bash
+SBT_ROOT=`echo $(dirname $(readlink -f $0))`
+#CWD=`echo $(dirname $(readlink -f $0))`
+#cd $CWD
+
+test -e server-cred.sh && source server-cred.sh
+
+SITE=${SITE:-}
+if [ "$SITE" != "" ]; then
+   SITE="-"${SITE}
+fi
+
+APP=${1}
+MAIN=${2}
+
+shift
+shift
+
+#ARGS="$@"
+ARGS=$@
+
+if [ "$CWD" != "" ]; then
+   APP_HOME=$CWD
+else
+   APP_HOME=${APP_HOME:-`pwd`}
+fi
+
+CONFIG="application${SITE}.conf"
+PLUGINS=${PLUGINS:-${CWD}/plugins}
+
+if [ "$APP_EXEC" == "bloop" ]; then
+  APP_PROJECT=${APP//-/_}
+  
+  if [ "$DEBUG" != "" ]; then      
+      >&2 echo "APP: $APP"
+      >&2 echo "APP_HOME: $APP_HOME"
+      >&2 echo "MAIN: $MAIN"
+      # to be compatibble with old scripts (to be deprecated)
+      >&2 echo "OPT: $OPT"
+      >&2 echo "JAVA_OPTS: $JAVA_OPTS"
+      >&2 echo "ARGS: $ARGS"
+      >&2 echo "SITE: ${SITE}"
+      >&2 echo "CONFIG: ${CONFIG}"
+      >&2 echo "MEM: ${MEM}"
+      >&2 echo "STACK: ${STACK}"
+      #>&2 echo $CP
+      >&2 echo "pwd: `pwd`"
+  fi
+  
+  exec bloop run ${APP_PROJECT} -c $SBT_ROOT/.bloop -m ${MAIN} -- -J-Dconfig.resource=$CONFIG -J-Dcolor $ARGS
+fi
+
+# fat jar
+JAR_FAT=`ls ${APP_HOME}/target/scala-2.13/*assembly*.jar`
+# SBT Classes
+CLASSES=${APP_HOME}/target/scala-2.13/classes
+
+# Bloop classes
+# APP_PROJECT=${APP//-/_}
+# BLOOP_PATH=${SBT_ROOT}/.bloop/${APP_PROJECT}/bloop-internal-classes
+# CLASSES_BLOOP_RANDOM=`ls -d ${BLOOP_PATH}/classes* 2>/dev/null | xargs -n1 basename | xargs echo`
+# CLASSES_BLOOP=${BLOOP_PATH}/${CLASSES_BLOOP_RANDOM}
+
+# additional libs
+JAR_UNFAT=`ls ${APP_HOME}/lib/*.jar`
+
+# list of jar. Generated with command:
+# sbt -error ";project module; export dependencyClasspath" >CLASSPATH
+#JAR_FILES=`cat ${CWD}/CLASSPATH`
+JAR_FILES=`cat ${APP_HOME}/CLASSPATH`
+
+PLUGIN_JARS="${PLUGINS}/*"
+CP="${APP_HOME}/conf/:${JAR_FAT}:${JAR_UNFAT}:${CLASSES}:${JAR_FILES}:${CLASSES_BLOOP}:${PLUGIN_JARS}"
+
+MEM=${MEM:-1G}
+STACK=${STACK:-512M}
+
+if [ "$DEBUG" != "" ]; then
+   >&2 echo "=== Class Path ======================================="
+   echo $CP | sed "s/\:/\n/g" >&2
+   >&2 echo "======================================================"
+
+   >&2 echo "APP: $APP"
+   >&2 echo "APP_HOME: $APP_HOME"
+   >&2 echo "MAIN: $MAIN"
+   # to be compatibble with old scripts (to be deprecated)
+   >&2 echo "OPT: $OPT"
+   >&2 echo "JAVA_OPTS: $JAVA_OPTS"
+   >&2 echo "ARGS: $ARGS"
+   >&2 echo "SITE: ${SITE}"
+   >&2 echo "CONFIG: ${CONFIG}"
+   >&2 echo "MEM: ${MEM}"
+   >&2 echo "STACK: ${STACK}"
+
+   #>&2 echo $CP
+   >&2 echo "pwd: `pwd`"
+
+fi
+
+# command:
+# JAVA_OPTS should be overriden by old script parameters like $OPT
+
+# WARNING: Experiment no-globbing !
+# WARNING: $ARGS must not be quoted or it will squash multiple arguments from the launch script.
+# NOTE: I think the only thing which is extremely stupid in Linux/Unix is SH/BASH 
+set -o noglob
+exec $JAVA_HOME/bin/java -Xss${STACK} -Xms${MEM} -Xmx${MEM} $JAVA_OPTS -Dcolor -Dconfig.resource=$CONFIG -cp $CP $AGENT $OPT $MAIN $ARGS
+set +o noglob

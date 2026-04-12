@@ -1,0 +1,305 @@
+package io.syspulse.ika.store
+
+import io.syspulse.ika.Config
+// DEPRECATED: cache package removed - ProxyCache
+import io.syspulse.ika.pool.RpcPoolSticky
+
+import akka.http.scaladsl.model.HttpHeader
+
+import org.scalatest.wordspec.AnyWordSpec
+import org.scalatest.matchers.should.Matchers
+import org.scalatest.concurrent.ScalaFutures
+
+import scala.collection.concurrent.TrieMap
+import scala.concurrent.Future
+import scala.concurrent.duration._
+
+import spray.json._
+
+class ProxyStoreRpcBatchSpec extends AnyWordSpec with Matchers with ScalaFutures {
+
+  // keep tests snappy even on loaded CI
+  implicit override val patienceConfig: PatienceConfig =
+    PatienceConfig(timeout = 3.seconds, interval = 25.millis)
+
+  class MemCache extends ProxyCache {
+    private val m = TrieMap.empty[String, String]
+    def find(key: String): Future[Option[String]] = Future.successful(m.get(key))
+    def findAll(keys: Seq[String]): Future[Seq[Option[String]]] = Future.successful(keys.map(m.get))
+    def cache(key: String, res: String): Future[String] = {
+      m.put(key, res)
+      Future.successful(res)
+    }
+  }
+
+  def mkReq(id: Int, method: String = "eth_test", params: String = "[]"): String =
+    s"""{"jsonrpc":"2.0","method":"${method}","params":${params},"id":${id}}"""
+
+  def mkOkRes(id: JsValue): JsValue =
+    JsObject(
+      "jsonrpc" -> JsString("2.0"),
+      "id" -> id,
+      "result" -> JsString(s"ok-${id.compactPrint}")
+    )
+
+  private def idsOfBatchResponse(body: String): Vector[JsValue] =
+    body.parseJson.asInstanceOf[JsArray].elements.map(_.asJsObject.fields("id"))
+
+  private def jsIdToInt(id: JsValue): Int =
+    id match {
+      case JsNumber(n) => n.toIntExact
+      case JsString(s) => s.toInt
+      case other       => throw new RuntimeException(s"unsupported id json: ${other}")
+    }
+
+  private def anyIdToInt(id: Any): Int =
+    id match {
+      case i: Int    => i
+      case l: Long   => l.toInt
+      case d: Double => d.toInt
+      case bd: BigDecimal => bd.toInt
+      case s: String => s.toInt
+      case other     => throw new RuntimeException(s"unsupported id type: ${other.getClass.getName}: ${other}")
+    }
+
+  "ProxyStoreRcpBatch.batch" should {
+
+    "handle empty batch (no http calls)" in {
+      implicit val config: Config = Config()
+      implicit val cache: ProxyCache = new MemCache()
+      val pool = new RpcPoolSticky(Seq("http://stub"))
+
+      var httpCalls = 0
+      val proxy = new ProxyStoreRcpBatch(pool) {
+        override def http(uri: String, req: String, headers: Seq[HttpHeader]): Future[String] = {
+          httpCalls += 1
+          Future.successful("[]")
+        }
+      }
+
+      val f = proxy.batch("http://stub", "[]", Seq.empty, pool.connect("[]"))
+      whenReady(f) { r =>
+        r.src should ===(ProxyData.CACHE)
+        r.body should ===("[]")
+        httpCalls should ===(0)
+      }
+    }
+
+    "handle single item in batch (and cache on second call)" in {
+      implicit val config: Config = Config()
+      implicit val cache: ProxyCache = new MemCache()
+      val pool = new RpcPoolSticky(Seq("http://stub"))
+
+      var httpCalls = 0
+      val proxy = new ProxyStoreRcpBatch(pool) {
+        override def http(uri: String, req: String, headers: Seq[HttpHeader]): Future[String] = {
+          httpCalls += 1
+          val ids = req.parseJson.asInstanceOf[JsArray].elements.map(_.asJsObject.fields("id"))
+          Future.successful(JsArray(ids.map(mkOkRes).toVector).compactPrint)
+        }
+      }
+
+      val req = s"[${mkReq(1)}]"
+      val f1 = proxy.batch("http://stub", req, Seq.empty, pool.connect(req))
+      whenReady(f1) { r =>
+        r.src should ===(ProxyData.REMOTE)
+        httpCalls should ===(1)
+      }
+
+      val f2 = proxy.batch("http://stub", req, Seq.empty, pool.connect(req))
+      whenReady(f2) { r =>
+        r.src should ===(ProxyData.CACHE)
+        httpCalls should ===(1)
+      }
+    }
+
+    "handle multiple items in batch (and cache on second call)" in {
+      implicit val config: Config = Config()
+      implicit val cache: ProxyCache = new MemCache()
+      val pool = new RpcPoolSticky(Seq("http://stub"))
+
+      var httpCalls = 0
+      val proxy = new ProxyStoreRcpBatch(pool) {
+        override def http(uri: String, req: String, headers: Seq[HttpHeader]): Future[String] = {
+          httpCalls += 1
+          val ids = req.parseJson.asInstanceOf[JsArray].elements.map(_.asJsObject.fields("id"))
+          Future.successful(JsArray(ids.map(mkOkRes).toVector).compactPrint)
+        }
+      }
+
+      val req = s"[${mkReq(1)},${mkReq(2)},${mkReq(3)}]"
+      val f1 = proxy.batch("http://stub", req, Seq.empty, pool.connect(req))
+      whenReady(f1) { r =>
+        r.src should ===(ProxyData.REMOTE)
+        httpCalls should ===(1)
+      }
+
+      val f2 = proxy.batch("http://stub", req, Seq.empty, pool.connect(req))
+      whenReady(f2) { r =>
+        r.src should ===(ProxyData.CACHE)
+        httpCalls should ===(1)
+      }
+    }
+
+    "fail on missing response element in batch (size mismatch)" in {
+      implicit val config: Config = Config()
+      implicit val cache: ProxyCache = new MemCache()
+      val pool = new RpcPoolSticky(Seq("http://stub"))
+
+      val proxy = new ProxyStoreRcpBatch(pool) {
+        override def http(uri: String, req: String, headers: Seq[HttpHeader]): Future[String] = {
+          val ids = req.parseJson.asInstanceOf[JsArray].elements.map(_.asJsObject.fields("id"))
+          // intentionally drop the last element to emulate a broken upstream response
+          val dropped = ids.dropRight(1)
+          Future.successful(JsArray(dropped.map(mkOkRes).toVector).compactPrint)
+        }
+      }
+
+      val req = s"[${mkReq(1)},${mkReq(2)}]"
+      val f = proxy.batch("http://stub", req, Seq.empty, pool.connect(req))
+      whenReady(f.failed) { e =>
+        e.getMessage should include("response size=")
+        e.getMessage should include("expected=")
+      }
+    }
+
+    "fail when the first response item is missing" in {
+      implicit val config: Config = Config()
+      implicit val cache: ProxyCache = new MemCache()
+      val pool = new RpcPoolSticky(Seq("http://stub"))
+
+      val proxy = new ProxyStoreRcpBatch(pool) {
+        override def http(uri: String, req: String, headers: Seq[HttpHeader]): Future[String] = {
+          val ids = req.parseJson.asInstanceOf[JsArray].elements.map(_.asJsObject.fields("id"))
+          val droppedFirst = ids.drop(1)
+          Future.successful(JsArray(droppedFirst.map(mkOkRes).toVector).compactPrint)
+        }
+      }
+
+      val req = s"[${mkReq(1)},${mkReq(2)},${mkReq(3)}]"
+      val f = proxy.batch("http://stub", req, Seq.empty, pool.connect(req))
+      whenReady(f.failed) { e =>
+        e.getMessage should include("response size=")
+        e.getMessage should include("expected=")
+      }
+    }
+
+    "fail when a middle response item is missing" in {
+      implicit val config: Config = Config()
+      implicit val cache: ProxyCache = new MemCache()
+      val pool = new RpcPoolSticky(Seq("http://stub"))
+
+      val proxy = new ProxyStoreRcpBatch(pool) {
+        override def http(uri: String, req: String, headers: Seq[HttpHeader]): Future[String] = {
+          val ids = req.parseJson.asInstanceOf[JsArray].elements.map(_.asJsObject.fields("id")).toVector
+          // drop the middle element (index 1)
+          val kept = ids.zipWithIndex.collect { case (v, i) if i != 1 => v }
+          Future.successful(JsArray(kept.map(mkOkRes)).compactPrint)
+        }
+      }
+
+      val req = s"[${mkReq(1)},${mkReq(2)},${mkReq(3)}]"
+      val f = proxy.batch("http://stub", req, Seq.empty, pool.connect(req))
+      whenReady(f.failed) { e =>
+        e.getMessage should include("response size=")
+        e.getMessage should include("expected=")
+      }
+    }
+
+    "fail when the last response item is missing" in {
+      implicit val config: Config = Config()
+      implicit val cache: ProxyCache = new MemCache()
+      val pool = new RpcPoolSticky(Seq("http://stub"))
+
+      val proxy = new ProxyStoreRcpBatch(pool) {
+        override def http(uri: String, req: String, headers: Seq[HttpHeader]): Future[String] = {
+          val ids = req.parseJson.asInstanceOf[JsArray].elements.map(_.asJsObject.fields("id"))
+          val droppedLast = ids.dropRight(1)
+          Future.successful(JsArray(droppedLast.map(mkOkRes).toVector).compactPrint)
+        }
+      }
+
+      val req = s"[${mkReq(1)},${mkReq(2)},${mkReq(3)}]"
+      val f = proxy.batch("http://stub", req, Seq.empty, pool.connect(req))
+      whenReady(f.failed) { e =>
+        e.getMessage should include("response size=")
+        e.getMessage should include("expected=")
+      }
+    }
+
+    "fail when multiple response items are missing" in {
+      implicit val config: Config = Config()
+      implicit val cache: ProxyCache = new MemCache()
+      val pool = new RpcPoolSticky(Seq("http://stub"))
+
+      val proxy = new ProxyStoreRcpBatch(pool) {
+        override def http(uri: String, req: String, headers: Seq[HttpHeader]): Future[String] = {
+          val ids = req.parseJson.asInstanceOf[JsArray].elements.map(_.asJsObject.fields("id")).toVector
+          // keep only the first item, drop the rest
+          val kept = ids.take(1)
+          Future.successful(JsArray(kept.map(mkOkRes)).compactPrint)
+        }
+      }
+
+      val req = s"[${mkReq(1)},${mkReq(2)},${mkReq(3)},${mkReq(4)}]"
+      val f = proxy.batch("http://stub", req, Seq.empty, pool.connect(req))
+      whenReady(f.failed) { e =>
+        e.getMessage should include("response size=")
+        e.getMessage should include("expected=")
+      }
+    }
+
+    "assemble batch from mix of cached and fresh responses (preserving order)" in {
+      implicit val config: Config = Config()
+      val mem = new MemCache()
+      implicit val cache: ProxyCache = mem
+      val pool = new RpcPoolSticky(Seq("http://stub"))
+
+      def runCase(allIds: Vector[Int], cachedIds: Set[Int]): Unit = {
+        var httpCalls = 0
+        val proxy = new ProxyStoreRcpBatch(pool) {
+          override def http(uri: String, req: String, headers: Seq[HttpHeader]): Future[String] = {
+            httpCalls += 1
+            val ids = req.parseJson.asInstanceOf[JsArray].elements.map(_.asJsObject.fields("id"))
+            Future.successful(JsArray(ids.map(mkOkRes).toVector).compactPrint)
+          }
+        }
+
+        // cache key ignores id (method+params only), so make params unique per item
+        val req = allIds.map(id => mkReq(id, params = s"[${id}]")).mkString("[", ",", "]")
+        val decoded = proxy.decodeBatch(req).toVector
+
+        // seed cache for selected ids
+        decoded.foreach { r =>
+          val idNum = anyIdToInt(r.id)
+          if (cachedIds.contains(idNum)) {
+            val key = proxy.getKey(r)
+            val cachedRsp = mkOkRes(JsNumber(idNum)).compactPrint
+            mem.cache(key, cachedRsp).futureValue
+          }
+        }
+
+        val r1 = proxy.batch("http://stub", req, Seq.empty, pool.connect(req)).futureValue
+        idsOfBatchResponse(r1.body).map(jsIdToInt) should ===(allIds)
+
+        if (cachedIds.size == allIds.size) httpCalls should ===(0)
+        else httpCalls should ===(1)
+
+        // second call should now be fully cached
+        val r2 = proxy.batch("http://stub", req, Seq.empty, pool.connect(req)).futureValue
+        idsOfBatchResponse(r2.body).map(jsIdToInt) should ===(allIds)
+        httpCalls should ===(if (cachedIds.size == allIds.size) 0 else 1)
+      }
+
+      // cached in the beginning
+      runCase(allIds = Vector(1, 2, 3, 4), cachedIds = Set(1, 2))
+      // cached in the middle (order should remain 1,2,3,4,5)
+      runCase(allIds = Vector(1, 2, 3, 4, 5), cachedIds = Set(3))
+      // alternating cache/fresh
+      runCase(allIds = Vector(10, 11, 12, 13, 14, 15), cachedIds = Set(10, 12, 14))
+      // all cached (no http)
+      runCase(allIds = Vector(21, 22), cachedIds = Set(21, 22))
+    }
+  }
+}
+
