@@ -6,6 +6,18 @@ import akka.http.scaladsl.model.HttpHeader
 import io.syspulse.ika.store.ProxyData
 
 /**
+ * Session state controls pipeline flow.
+ *
+ * - CONTINUE: Continue processing to the next processor (default)
+ * - RETURN: Stop processing successfully, return current session (e.g., cache hit)
+ * - REJECT: Stop processing with error, session has rejection details
+ */
+object SessionState extends Enumeration {
+  type SessionState = Value
+  val CONTINUE, RETURN, REJECT = Value
+}
+
+/**
  * Rejection represents a pipeline failure.
  *
  * The rejection is abstract and does not assume any specific format (JSON-RPC, REST, etc.).
@@ -42,6 +54,11 @@ case class Rejection(
  * lower-cased field name ([[java.util.Locale.ROOT]]); each name appears at most once.
  * [[requestHeaders]] / [[responseHeaders]] expose the current [[akka.http.scaladsl.model.HttpHeader]]s
  * as a sequence (order is not specified).
+ *
+ * Pipeline control via state:
+ * - CONTINUE: Process next processor
+ * - RETURN: Stop pipeline successfully (e.g., cache hit)
+ * - REJECT: Stop pipeline with error
  */
 case class Session private[processor] (
   // Request data
@@ -54,6 +71,7 @@ case class Session private[processor] (
   responseSource: ProxyData.Source,
 
   // Pipeline control
+  state: SessionState.SessionState,
   rejection: Option[Rejection],
 
   // Inter-processor communication
@@ -76,13 +94,35 @@ case class Session private[processor] (
    * Mark this session as rejected with given error details
    */
   def reject(code: Int, message: String, processorName: String, details: Option[String] = None): Session = {
-    copy(rejection = Some(Rejection(code, message, processorName, details)))
+    copy(
+      state = SessionState.REJECT,
+      rejection = Some(Rejection(code, message, processorName, details))
+    )
+  }
+
+  /**
+   * Mark this session to return early (stop processing, success)
+   * Used by CacheProcessor when cache hit occurs
+   */
+  def returnEarly(reason: String = "early_return"): Session = {
+    copy(state = SessionState.RETURN)
+      .putData("returnReason", reason)
   }
 
   /**
    * Check if session is rejected
    */
-  def isRejected: Boolean = rejection.isDefined
+  def isRejected: Boolean = state == SessionState.REJECT
+
+  /**
+   * Check if session should return early (stop processing)
+   */
+  def shouldReturn: Boolean = state == SessionState.RETURN
+
+  /**
+   * Check if session should continue processing
+   */
+  def shouldContinue: Boolean = state == SessionState.CONTINUE
 
   /**
    * Store processor-specific data for downstream processors
@@ -203,6 +243,7 @@ object Session {
     responseBody: Option[String] = None,
     responseHeaders: Seq[HttpHeader] = Seq.empty,
     responseSource: ProxyData.Source = ProxyData.LOCAL,
+    state: SessionState.SessionState = SessionState.CONTINUE,
     rejection: Option[Rejection] = None,
     processorData: Map[String, Any] = Map.empty,
     startTime: Long = System.currentTimeMillis(),
@@ -214,6 +255,7 @@ object Session {
       responseBody,
       headersFromSeq(responseHeaders),
       responseSource,
+      state,
       rejection,
       processorData,
       startTime,

@@ -129,6 +129,7 @@ class Telemetry {
   def incCacheHits(): Unit = inc("cache.hits")
   def incCacheMisses(): Unit = inc("cache.misses")
   def incRejections(): Unit = inc("rejections.total")
+  def addTokens(tokens: Int): Unit = inc("ai.tokens.total", tokens.toLong)
 
   def recordRequestTime(durationMs: Long): Unit = recordTime("request.duration", durationMs)
   def recordCacheTime(durationMs: Long): Unit = recordTime("cache.duration", durationMs)

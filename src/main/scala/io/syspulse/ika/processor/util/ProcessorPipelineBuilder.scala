@@ -7,6 +7,7 @@ import akka.actor.ActorSystem
 import io.syspulse.ika.processor.impl._
 import io.syspulse.ika.processor.uri.CacheURI
 import io.syspulse.ika.processor.{ProcessorPipeline}
+import io.syspulse.ika.processor.rpc3.Rpc3Processor
 
 /**
  * PipelineBuilder constructs processor pipelines from configuration.
@@ -52,7 +53,7 @@ class ProcessorPipelineBuilder(
    * Build Web3 RPC pipeline with caching, load balancing, retry
    *
    * Pipeline:
-   * Throttle → Timeout → Cache → LoadBalancer → Retry[HttpClient] → JsonRpcRejection
+   * Throttle → Timeout → Cache → LoadBalancer → Rpc3 → Retry[HttpClient] → JsonRpcRejection
    */
   def buildWeb3Pipeline(): ProcessorPipeline = {
     log.info("Building Web3 RPC pipeline")
@@ -72,6 +73,9 @@ class ProcessorPipelineBuilder(
 
       // Load balancer
       Some(buildLoadBalancer()),
+
+      // RPC3 processor - filters problematic headers for QuickNode
+      Some(Rpc3Processor()),
 
       // Retry wrapping HTTP client
       Some(new RetryProcessor(
@@ -111,8 +115,6 @@ class ProcessorPipelineBuilder(
    *
    * Pipeline:
    * Throttle → Timeout → AIRouter → LoadBalancer → Retry[HttpClient] → AITokens → RestApiRejection
-   *
-   * TODO: Implement AIRouterProcessor and AITokensProcessor
    */
   def buildAIPipeline(): ProcessorPipeline = {
     log.info("Building AI API pipeline")
@@ -126,9 +128,10 @@ class ProcessorPipelineBuilder(
       // Set timeout
       Some(new TimeoutProcessor(processorConfig.timeout, Some(processorConfig.retryDelay))),
 
-      // TODO: Add AIRouterProcessor to extract model and set pool
+      // AI Router - extract model and set pool for load balancing
+      Some(AIRouterProcessor()),
 
-      // Load balancer (will use pool from AIRouter)
+      // Load balancer (uses pool from AIRouter)
       Some(buildLoadBalancer()),
 
       // Retry wrapping HTTP client
@@ -138,7 +141,8 @@ class ProcessorPipelineBuilder(
         delayMs = processorConfig.retryDelay
       )),
 
-      // TODO: Add AITokensProcessor to extract token usage from response
+      // AI Tokens - extract token usage from response
+      Some(AITokensProcessor()),
 
       // REST API rejection handler (AI APIs typically use REST format)
       Some(RejectionProcessor.restApi(defaultHttpStatus = 500))

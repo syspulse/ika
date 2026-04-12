@@ -18,18 +18,22 @@ import io.syspulse.ika.store.ProxyData
 /**
  * HttpClientProcessor makes the actual HTTP request to the destination.
  *
+ * This is a generic HTTP client processor that works with any protocol.
+ * Protocol-specific header filtering should be done by upstream processors
+ * (e.g., Rpc3Processor for JSON-RPC).
+ *
  * Features:
  * - Uses destination from session (set by LoadBalancerProcessor)
  * - Uses request body and headers from session (can be modified by upstream processors)
  * - Respects timeout from session (set by TimeoutProcessor)
  * - Handles compression/decompression (gzip, deflate)
- * - Filters headers (removes Timeout-Access, Host - QuickNode rejects empty Host with 401)
+ * - Adds Accept-Encoding header if compression is configured
  * - Sets response on session
  *
  * IMPORTANT: This processor uses session.requestBody and session.requestHeaders,
  * which means upstream processors can modify the request before HTTP is sent.
- * For example, a HeaderFilterProcessor could add/remove headers, or a
- * BodyTransformProcessor could modify the request body.
+ * For example, Rpc3Processor filters problematic headers for QuickNode,
+ * or a BodyTransformProcessor could modify the request body.
  *
  * This is typically the last processor in the request chain before response processors.
  */
@@ -81,10 +85,9 @@ class HttpClientProcessor(
    * Make HTTP POST request
    */
   private def makeRequest(uri: String, body: String, headers: Seq[HttpHeader], timeoutMs: Long): Future[String] = {
-    // Filter headers and add compression if requested
-    val filteredHeaders = headers.filter(h =>
-      h.name() != "Timeout-Access" && h.name() != "Host"
-    ) ++ {
+    // Add compression header if requested
+    // Protocol-specific header filtering should be done by upstream processors (e.g., Rpc3Processor)
+    val requestHeaders = headers ++ {
       if (compression.nonEmpty)
         Seq(RawHeader("Accept-Encoding", compression))
       else
@@ -94,7 +97,7 @@ class HttpClientProcessor(
     val request = HttpRequest(
       method = HttpMethods.POST,
       uri = uri,
-      headers = filteredHeaders,
+      headers = requestHeaders,
       entity = HttpEntity(ContentTypes.`application/json`, body)
     )
 

@@ -141,7 +141,7 @@ class CacheProcessor(
         val entryTTL = getTTL(cacheKey)
 
         if (now - entry.ts < entryTTL) {
-          // Cache hit
+          // Cache hit - return early, skip remaining processors
           recordCacheHit(session)
           log.info(s"Cache HIT: $cacheKey")
 
@@ -150,6 +150,7 @@ class CacheProcessor(
             .putData("cacheHit", true)
             .putData("fromCache", true)
             .putData("cacheKey", cacheKey)
+            .returnEarly("cache_hit")  // Stop pipeline, return cached response
           )
         } else {
           // Expired - remove and miss
