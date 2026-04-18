@@ -1,179 +1,182 @@
 package io.syspulse.ika.processor.util
 
-import scala.concurrent.ExecutionContext
 import com.typesafe.scalalogging.Logger
 import akka.actor.ActorSystem
+import com.typesafe.config.{Config => TypesafeConfig}
+import scala.concurrent.ExecutionContext
+import scala.jdk.CollectionConverters._
 
 import io.syspulse.ika.processor.impl._
-import io.syspulse.ika.processor.uri.CacheURI
+import io.syspulse.ika.processor.Processor
+import io.syspulse.ika.processor.uri.{CacheURI, PoolURI, Rpc3URI}
+import io.syspulse.ika.processor.rpc3.Rpc3Processor
 import io.syspulse.ika.processor.{ProcessorPipeline}
 import io.syspulse.ika.processor.rpc3.Rpc3Processor
+import io.syspulse.ika.processor.ai.{AIRouterProcessor, AITokensProcessorConfig}
+import io.syspulse.ika.processor.ai.AIRouterProcessor
+import io.syspulse.ika.processor.ai.AITokensProcessor
 
 /**
- * PipelineBuilder constructs processor pipelines from configuration.
- *
- * Supports multiple pipeline profiles:
- * - "web3" - Web3 RPC with caching, throttling, load balancing, retry, timeout
- * - "ai" - AI API with model routing, token extraction
- * - "simple" - Basic proxy without caching or advanced features
- * - "custom" - User-defined processor chain from config
- *
- * Default pipeline for web3:
- * Throttle → Timeout → Cache → LoadBalancer → Retry[HttpClient] → JsonRpcRejection
+ * ProcessorPipelineBuilder builds pipelines from:
+ * - built-in programmatic profiles (web3/http-pool/ai/proxy)
+ * - Typesafe config sections (processors=..., profile.<name>.processors=...)
  */
-class ProcessorPipelineBuilder(
-  destinations: Seq[String],
-  processorConfig: ProcessorConfig = ProcessorConfig.default,
-  poolStrategy: String = "sticky",
-  cacheUri: String = "rpc3://"  // Default to RPC3 cache for Web3 use case
-)(
-  implicit ec: ExecutionContext,
-  actorSystem: ActorSystem
-) {
+object ProcessorPipelineBuilder {
 
-  private val log = Logger(s"${this.getClass.getSimpleName}")
+  def buildWeb3Pipeline(
+    destinations: Seq[String],
+    profile: PipelineProfile,
+    poolUri: String = "sticky://",
+    cacheUri: String = "rpc3://"
+  )(implicit ec: ExecutionContext, actorSystem: ActorSystem): ProcessorPipeline = {
+    implicit val scheduler: akka.actor.Scheduler = actorSystem.scheduler
 
-  implicit val scheduler: akka.actor.Scheduler = actorSystem.scheduler
-
-  /**
-   * Build a pipeline based on the configured profile
-   */
-  def build(profile: String = "web3"): ProcessorPipeline = {
-    profile.toLowerCase match {
-      case "web3" => buildWeb3Pipeline()
-      case "simple" => buildSimplePipeline()
-      case "ai" => buildAIPipeline()
-      case other =>
-        log.warn(s"Unknown pipeline profile: $other, using web3")
-        buildWeb3Pipeline()
-    }
-  }
-
-  /**
-   * Build Web3 RPC pipeline with caching, load balancing, retry
-   *
-   * Pipeline:
-   * Throttle → Timeout → Cache → LoadBalancer → Rpc3 → Retry[HttpClient] → JsonRpcRejection
-   */
-  def buildWeb3Pipeline(): ProcessorPipeline = {
-    log.info("Building Web3 RPC pipeline")
-
-    // Build processors
     val processors = Seq(
-      // Throttle if configured
-      if (processorConfig.throttle > 0) {
-        Some(new ThrottleProcessor(processorConfig.throttle, global = true))
-      } else None,
-
-      // Set timeout
-      Some(new TimeoutProcessor(processorConfig.timeout, Some(processorConfig.retryDelay))),
-
-      // Cache (RPC3-specific with block number handling)
-      Some(CacheURI.parse(cacheUri)),
-
-      // Load balancer
-      Some(buildLoadBalancer()),
-
-      // RPC3 processor - filters problematic headers for QuickNode
-      Some(Rpc3Processor()),
-
-      // Retry wrapping HTTP client
-      Some(new RetryProcessor(
-        wrapped = HttpClientProcessor(processorConfig.compress),
-        maxRetries = processorConfig.retry,
-        delayMs = processorConfig.retryDelay
-      )),
-
-      // JSON-RPC rejection handler (at the end to handle any rejections)
-      Some(RejectionProcessor.jsonRpc(httpStatusCode = 200))
+      Some(RejectionProcessor.jsonRpc(httpStatusCode = 200)),
+      if (profile.throttle > 0) Some(new ThrottleProcessor(profile.throttle)) else None,
+      Some(CacheProcessor.fromUri(CacheURI(cacheUri))),
+      Some(PoolProcessor.fromUri(PoolURI(poolUri), destinations)),
+      Some(Rpc3Processor.fromUri(Rpc3URI(cacheUri))),
+      Some(new TimeoutProcessor(profile.timeout, Some(profile.retryDelay))),
+      Some(new RetryProcessor(maxRetries = profile.retry, delayMs = profile.retryDelay)),
+      Some(new HttpProcessor(compression = profile.compress))
     ).flatten
 
     ProcessorPipeline.fromSeq(processors, "Web3Pipeline")
   }
 
-  /**
-   * Build simple pipeline without caching or retry
-   *
-   * Pipeline:
-   * Timeout → LoadBalancer → HttpClient → JsonRpcRejection
-   */
-  def buildSimplePipeline(): ProcessorPipeline = {
-    log.info("Building Simple pipeline")
-
+  def buildHttpPoolPipeline(
+    destinations: Seq[String],
+    profile: PipelineProfile,
+    poolUri: String = "sticky://"
+  )(implicit ec: ExecutionContext, actorSystem: ActorSystem): ProcessorPipeline = {
     val processors = Seq(
-      new TimeoutProcessor(processorConfig.timeout),
-      buildLoadBalancer(),
-      HttpClientProcessor(processorConfig.compress),
-      RejectionProcessor.jsonRpc(httpStatusCode = 200)
+      RejectionProcessor.jsonRpc(httpStatusCode = 200),
+      new TimeoutProcessor(profile.timeout),
+      PoolProcessor.fromUri(PoolURI(poolUri), destinations),
+      new HttpProcessor(compression = profile.compress)
     )
 
-    ProcessorPipeline.fromSeq(processors, "SimplePipeline")
+    ProcessorPipeline.fromSeq(processors, "HttpPoolPipeline")
   }
 
-  /**
-   * Build AI API pipeline with model routing
-   *
-   * Pipeline:
-   * Throttle → Timeout → AIRouter → LoadBalancer → Retry[HttpClient] → AITokens → RestApiRejection
-   */
-  def buildAIPipeline(): ProcessorPipeline = {
-    log.info("Building AI API pipeline")
+  def buildAIPipeline(
+    destinations: Seq[String],
+    profile: PipelineProfile,
+    poolUri: String = "sticky://"
+  )(implicit ec: ExecutionContext, actorSystem: ActorSystem): ProcessorPipeline = {
+    implicit val scheduler: akka.actor.Scheduler = actorSystem.scheduler
 
     val processors = Seq(
-      // Throttle if configured
-      if (processorConfig.throttle > 0) {
-        Some(new ThrottleProcessor(processorConfig.throttle, global = true))
-      } else None,
-
-      // Set timeout
-      Some(new TimeoutProcessor(processorConfig.timeout, Some(processorConfig.retryDelay))),
-
-      // AI Router - extract model and set pool for load balancing
+      Some(RejectionProcessor.restApi(defaultHttpStatus = 500)),
+      if (profile.throttle > 0) Some(new ThrottleProcessor(profile.throttle)) else None,
+      Some(new TimeoutProcessor(profile.timeout, Some(profile.retryDelay))),
       Some(AIRouterProcessor()),
-
-      // Load balancer (uses pool from AIRouter)
-      Some(buildLoadBalancer()),
-
-      // Retry wrapping HTTP client
-      Some(new RetryProcessor(
-        wrapped = HttpClientProcessor(processorConfig.compress),
-        maxRetries = processorConfig.retry,
-        delayMs = processorConfig.retryDelay
-      )),
-
-      // AI Tokens - extract token usage from response
-      Some(AITokensProcessor()),
-
-      // REST API rejection handler (AI APIs typically use REST format)
-      Some(RejectionProcessor.restApi(defaultHttpStatus = 500))
+      Some(PoolProcessor.fromUri(PoolURI(poolUri), destinations)),
+      Some(new RetryProcessor(maxRetries = profile.retry, delayMs = profile.retryDelay)),
+      Some(new HttpProcessor(compression = profile.compress)),
+      Some(AITokensProcessor())
     ).flatten
 
     ProcessorPipeline.fromSeq(processors, "AIPipeline")
   }
+  
+  /** Build a pipeline from `profile.<name>.processors` in config. */
+  def fromProfile(cfg: TypesafeConfig, profile: String)(implicit ec: ExecutionContext, actorSystem: ActorSystem): ProcessorPipeline =
+    fromConfig(cfg, profile)
 
   /**
-   * Build load balancer processor
+   * Build a pipeline from Typesafe configuration similar to `conf/application-ika.conf`.
+   *
+   * Expected structure:
+   * - processors = "throttle_1, pool_1, http_1"
+   * - throttle_1 { throttle = 3000 }
+   * - pool_1 { strategy = "lb", destinations = [ "host1=http://...", "host2=http://..." ] }
+   * - cache_1 { strategy = "expire://", ttl = 1000, gc = 60000 }
+   * - http_1 { method = "GET|POST", headers = { "Content-Type" = "application/json" } }
+   *
+   * Unknown processor ids are ignored.
    */
-  private def buildLoadBalancer(): LoadBalancerProcessor = {
-    log.info(s"Creating LoadBalancer with strategy: $poolStrategy, destinations: ${destinations.size}")
+  def fromConfig(cfg: TypesafeConfig)(implicit ec: ExecutionContext, actorSystem: ActorSystem): ProcessorPipeline = {
+    val log = Logger("ProcessorPipelineBuilder.fromConfig")
 
-    poolStrategy.toLowerCase match {
-      case "sticky" => LoadBalancerProcessor.sticky(destinations)
-      case "roundrobin" | "lb" => LoadBalancerProcessor.roundRobin(destinations)
-      case "random" => LoadBalancerProcessor.random(destinations)
-      case "hash" => LoadBalancerProcessor.hashSticky(destinations)
-      case _ => LoadBalancerProcessor.sticky(destinations)
+    val supported: Map[String, ProcessorConfigurable] = Seq[ProcessorConfigurable](
+      ThrottleProcessor,
+      TimeoutProcessor,
+      HeaderProcessor,
+      RetryProcessorConfig,
+      RejectionProcessorConfig,
+      CacheProcessor,
+      PoolProcessor,
+      HttpProcessor,
+      Rpc3Processor,
+      AIRouterProcessor,
+      AITokensProcessorConfig
+    ).map(b => b.tpe -> b).toMap
+
+    def has(path: String): Boolean = cfg.hasPath(path)
+    def getStringOpt(path: String): Option[String] = if (has(path)) Some(cfg.getString(path)) else None
+
+    val ids: Seq[String] =
+      getStringOpt("processors")
+        .map(_.split(',').toSeq.map(_.trim).filter(_.nonEmpty))
+        .getOrElse(Seq.empty)
+
+    val processors: Seq[Processor] = ids.flatMap { id =>
+      if (!cfg.hasPath(id)) {
+        log.warn(s"Ignoring processor id without config section: '$id'")
+        Nil
+      } else {
+        val c = cfg.getConfig(id)
+        val rawType = if (c.hasPath("type")) c.getString("type") else ""
+        val tpe = rawType.split("://", 2).toList match {
+          case head :: _ => head.trim
+          case _ => rawType.trim
+        }
+        supported.get(tpe) match {
+          case Some(b) =>
+            b.fromConfig(id, c)
+          case None =>
+            log.warn(s"Ignoring unsupported processor type: '$rawType' (id='$id')")
+            Nil
+        }
+      }
     }
-  }
-}
 
-object ProcessorPipelineBuilder {
-  def apply(
-    destinations: Seq[String],
-    processorConfig: ProcessorConfig = ProcessorConfig.default,
-    poolStrategy: String = "sticky",
-    cacheUri: String = "rpc3://"
-  )(implicit ec: ExecutionContext, actorSystem: ActorSystem): ProcessorPipelineBuilder = {
-    new ProcessorPipelineBuilder(destinations, processorConfig, poolStrategy, cacheUri)(ec, actorSystem)
+    ProcessorPipeline.fromSeq(processors, "ConfigPipeline")
+  }
+
+  /**
+   * Build a pipeline from an application.conf which defines processor sections at root
+   * and profile selector blocks under `profile.<name>`.
+   *
+   * Example:
+   * profile {
+   *   web3 = { processors = "throttle_1, pool_1, http_1" }
+   * }
+   */
+  def fromConfig(cfg: TypesafeConfig, profile: String)(implicit ec: ExecutionContext, actorSystem: ActorSystem): ProcessorPipeline = {
+    val log = Logger("ProcessorPipelineBuilder.fromConfig(profile)")
+    val path = s"profiles.${profile}"
+    if (!cfg.hasPath(path)) {
+      log.warn(s"Profiles section not found: '$path' (falling back to root processors)")
+      return fromConfig(cfg)
+    }
+
+    // Use root config for processor definitions, but take processor id list from the profile section.
+    val ids: Seq[String] =
+      if (cfg.getConfig(path).hasPath("processors"))
+        cfg.getConfig(path).getString("processors").split(',').toSeq.map(_.trim).filter(_.nonEmpty)
+      else
+        Seq.empty
+
+    if (ids.isEmpty) {
+      log.warn(s"No processors defined for profile '$profile' (falling back to root processors)")
+      return fromConfig(cfg)
+    }
+
+    // Create a small overlay config that only provides `processors = ...` while keeping root sections accessible.
+    val overlay = com.typesafe.config.ConfigFactory.parseString(s"""processors="${ids.mkString(", ")}"""")
+    fromConfig(overlay.withFallback(cfg).resolve())
   }
 }

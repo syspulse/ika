@@ -7,8 +7,7 @@ import scala.concurrent.duration._
 
 import akka.actor.ActorSystem
 import io.syspulse.ika.processor.impl.CacheProcessor
-import io.syspulse.ika.processor.rpc3.CacheRpc3Processor
-import io.syspulse.ika.store.ProxyData
+import io.syspulse.ika.processor.ResponseSource
 
 class SessionStateSpec extends AnyWordSpec with Matchers {
 
@@ -132,25 +131,25 @@ class SessionStateSpec extends AnyWordSpec with Matchers {
       var processor2Called = false
       var processor3Called = false
 
-      val processor1 = new Processor {
+      val processor1 = new RequestProcessor {
         def name = "Processor1"
-        def process(session: Session): Future[Session] = {
+        def processRequest(session: Session): Future[Session] = {
           processor1Called = true
           Future.successful(session)
         }
       }
 
-      val processor2 = new Processor {
+      val processor2 = new RequestProcessor {
         def name = "Processor2"
-        def process(session: Session): Future[Session] = {
+        def processRequest(session: Session): Future[Session] = {
           processor2Called = true
           Future.successful(session)
         }
       }
 
-      val processor3 = new Processor {
+      val processor3 = new RequestProcessor {
         def name = "Processor3"
-        def process(session: Session): Future[Session] = {
+        def processRequest(session: Session): Future[Session] = {
           processor3Called = true
           Future.successful(session)
         }
@@ -172,31 +171,27 @@ class SessionStateSpec extends AnyWordSpec with Matchers {
     "return early (RETURN state) on cache hit" in {
       var httpClientCalled = false
 
-      val cache = CacheRpc3Processor.expire(ttl = 30000L)
+      val cache = CacheProcessor.expire(ttl = 30000L)
+      val request = """{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}"""
+      val response = """{"jsonrpc":"2.0","result":"0x1234","id":1}"""
+
       val httpClient = new Processor {
         def name = "HttpClient"
         def process(session: Session): Future[Session] = {
           httpClientCalled = true
-          Future.successful(session.withResponseBody("from http"))
+          Future.successful(session.withResponseBody(response))
         }
       }
 
       val pipeline = ProcessorPipeline.fromSeq(Seq(cache, httpClient), "CachePipeline")
-
-      val request = """{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}"""
-      val response = """{"jsonrpc":"2.0","result":"0x1234","id":1}"""
 
       // First request - cache miss, should call HTTP
       val session1 = Session(requestBody = request)
       val result1 = Await.result(pipeline.process(session1), 5.seconds)
 
       httpClientCalled shouldBe true
-      result1.responseBody shouldBe Some("from http")
+      result1.responseBody shouldBe Some(response)
       result1.shouldContinue shouldBe true
-
-      // Cache the response manually
-      val session1WithCache = result1.withResponseBody(response)
-      Await.result(cache.process(session1WithCache), 5.seconds)
 
       // Second request - cache hit, should NOT call HTTP
       httpClientCalled = false
@@ -206,7 +201,7 @@ class SessionStateSpec extends AnyWordSpec with Matchers {
       httpClientCalled shouldBe false  // HTTP should NOT be called
       result2.shouldReturn shouldBe true  // Should return early
       result2.responseBody shouldBe Some(response)  // Should have cached response
-      result2.responseSource shouldBe ProxyData.CACHE
+      result2.responseSource shouldBe ResponseSource.CACHE
       result2.getData[String]("returnReason") shouldBe Some("cache_hit")
     }
   }

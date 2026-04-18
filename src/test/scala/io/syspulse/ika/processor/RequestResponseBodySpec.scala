@@ -9,11 +9,11 @@ import org.scalatest.wordspec.AnyWordSpec
 import akka.http.scaladsl.model.HttpHeader
 import akka.http.scaladsl.model.headers.RawHeader
 
-import io.syspulse.ika.store.ProxyData
+import io.syspulse.ika.processor.ResponseSource
 
 /**
  * Specs for [[Session.withRequestBody]] / [[Session.withResponse]] flowing through
- * [[RequestProcessor]] and [[ResponseProcessor]] chains (mirrors how [[io.syspulse.ika.processor.impl.HttpClientProcessor]]
+ * [[RequestProcessor]] and [[ResponseProcessor]] chains (mirrors how [[io.syspulse.ika.processor.impl.HttpProcessor]]
  * reads `session.requestBody` after upstream rewrites).
  *
  * Request/response [[akka.http.scaladsl.model.HttpHeader]] flows the same way as for bodies
@@ -69,12 +69,12 @@ class RequestResponseBodySpec extends AnyWordSpec with Matchers {
 
   /**
    * Simulates a backend: copies (possibly modified) request body into the response.
-   * Real code uses [[io.syspulse.ika.processor.impl.HttpClientProcessor]] which sends `session.requestBody`.
+   * Real code uses [[io.syspulse.ika.processor.impl.HttpProcessor]] which sends `session.requestBody`.
    */
   private class EchoRequestAsResponseProcessor extends RequestProcessor {
     def name: String = "EchoBackend"
     def processRequest(session: Session): Future[Session] =
-      Future.successful(session.withResponse("echo:" + session.requestBody, ProxyData.REMOTE))
+      Future.successful(session.withResponse("echo:" + session.requestBody, ResponseSource.REMOTE))
   }
 
   /** Echo plus fixed response headers (e.g. as if the origin returned `X-Backend-Trace`). */
@@ -82,7 +82,7 @@ class RequestResponseBodySpec extends AnyWordSpec with Matchers {
     def name: String = "EchoBackendWithRespHeaders"
     def processRequest(session: Session): Future[Session] =
       Future.successful(
-        session.withResponse("echo:" + session.requestBody, ProxyData.REMOTE, responseHeaders)
+        session.withResponse("echo:" + session.requestBody, ResponseSource.REMOTE, headers = responseHeaders)
       )
   }
 

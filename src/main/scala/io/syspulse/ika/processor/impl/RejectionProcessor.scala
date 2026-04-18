@@ -2,9 +2,13 @@ package io.syspulse.ika.processor.impl
 
 import scala.concurrent.{Future, ExecutionContext}
 import com.typesafe.scalalogging.Logger
+import com.typesafe.config.{Config => TypesafeConfig}
+import akka.actor.ActorSystem
+import akka.http.scaladsl.model.{ContentTypes, StatusCode}
 
 import io.syspulse.ika.processor.{Processor, Session, Rejection}
-import io.syspulse.ika.store.ProxyData
+import io.syspulse.ika.processor.ResponseSource
+import io.syspulse.ika.processor.util.ProcessorConfigurable
 
 /**
  * RejectionProcessor converts rejections into formatted error responses.
@@ -30,6 +34,8 @@ abstract class RejectionProcessor(implicit ec: ExecutionContext) extends Process
 
   def name: String
 
+  override def toString: String = name
+
   /**
    * Convert rejection to response body
    */
@@ -44,24 +50,24 @@ abstract class RejectionProcessor(implicit ec: ExecutionContext) extends Process
    * Process the session - converts rejection to error response
    */
   def process(session: Session): Future[Session] = {
-    session.rejection match {
-      case Some(rejection) =>
-        log.debug(s"Converting rejection: ${rejection}")
+    // Always call downstream first; then convert rejection (if any) to a response
+    next(session).map { s =>
+      s.rejection match {
+        case Some(rejection) =>
+          log.debug(s"Converting rejection: ${rejection}")
 
-        val responseBody = formatRejection(rejection, session)
-        val httpStatusCode = getHttpStatusCode(rejection, session)
+          val responseBody = formatRejection(rejection, s)
+          val httpStatusCode = getHttpStatusCode(rejection, s)
+          val status: StatusCode = StatusCode.int2StatusCode(httpStatusCode)
 
-        log.info(s"Rejection response: HTTP ${httpStatusCode}, processor: ${rejection.processorName}, code: ${rejection.code}")
+          log.info(s"Rejection response: HTTP ${httpStatusCode}, processor: ${rejection.processorName}, code: ${rejection.code}")
 
-        Future.successful(
-          session
-            .withResponse(responseBody, ProxyData.LOCAL)
+          s.withResponse(responseBody, ResponseSource.LOCAL, status = status, contentType = ContentTypes.`application/json`)
             .putData("httpStatusCode", httpStatusCode)
-        )
 
-      case None =>
-        // No rejection, pass through
-        Future.successful(session)
+        case None =>
+          s
+      }
     }
   }
 }
@@ -96,6 +102,9 @@ class JsonRpcRejectionProcessor(
 )(implicit ec: ExecutionContext) extends RejectionProcessor {
 
   def name: String = "JsonRpcRejection"
+
+  override def toString: String =
+    s"$name($httpStatusCode, $includeProcessor, $includeDetails)"
 
   def formatRejection(rejection: Rejection, session: Session): String = {
     val dataFields = Seq(
@@ -146,6 +155,9 @@ class RestApiRejectionProcessor(
 
   def name: String = "RestApiRejection"
 
+  override def toString: String =
+    s"$name($defaultHttpStatus, $includeProcessor, $includeDetails)"
+
   def formatRejection(rejection: Rejection, session: Session): String = {
     val fields = Seq(
       Some(s""""code": "${rejection.code}""""),
@@ -182,6 +194,8 @@ class CustomRejectionProcessor(
 )(implicit ec: ExecutionContext) extends RejectionProcessor {
 
   def name: String = "CustomRejection"
+
+  override def toString: String = s"$name($formatter, $statusCodeMapper)"
 
   def formatRejection(rejection: Rejection, session: Session): String = {
     formatter(rejection, session)
@@ -223,5 +237,32 @@ object RejectionProcessor {
     statusCodeMapper: (Rejection, Session) => Int
   )(implicit ec: ExecutionContext): CustomRejectionProcessor = {
     new CustomRejectionProcessor(formatter, statusCodeMapper)
+  }
+}
+
+object RejectionProcessorConfig extends ProcessorConfigurable {
+  override val tpe: String = "reject"
+
+  override def fromConfig(id: String, cfg: TypesafeConfig)(implicit ec: ExecutionContext, actorSystem: ActorSystem): Seq[Processor] = {
+    val mode =
+      if (cfg.hasPath("mode")) cfg.getString("mode").trim.toLowerCase
+      else if (cfg.hasPath("format")) cfg.getString("format").trim.toLowerCase
+      else "jsonrpc"
+
+    mode match {
+      case "rest" | "restapi" =>
+        val defaultHttpStatus =
+          if (cfg.hasPath("defaultHttpStatus")) cfg.getInt("defaultHttpStatus")
+          else if (cfg.hasPath("httpStatusCode")) cfg.getInt("httpStatusCode")
+          else 500
+        Seq(RejectionProcessor.restApi(defaultHttpStatus = defaultHttpStatus))
+
+      case _ =>
+        val httpStatusCode =
+          if (cfg.hasPath("httpStatusCode")) cfg.getInt("httpStatusCode")
+          else if (cfg.hasPath("status")) cfg.getInt("status")
+          else 200
+        Seq(RejectionProcessor.jsonRpc(httpStatusCode = httpStatusCode))
+    }
   }
 }

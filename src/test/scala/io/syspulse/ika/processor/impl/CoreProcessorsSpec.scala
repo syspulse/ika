@@ -7,9 +7,10 @@ import scala.concurrent.duration._
 import org.scalatest.concurrent.ScalaFutures
 
 import akka.actor.ActorSystem
-import io.syspulse.ika.processor.{Session, ProcessorPipeline}
-import io.syspulse.ika.processor.rpc3.CacheRpc3Processor
-import io.syspulse.ika.store.ProxyData
+import akka.http.scaladsl.model.headers.RawHeader
+import io.syspulse.ika.processor.{Session, ProcessorPipeline, RequestProcessor}
+import io.syspulse.ika.processor.rpc3.Rpc3Processor
+import io.syspulse.ika.processor.ResponseSource
 
 class CoreProcessorsSpec extends AnyWordSpec with Matchers with ScalaFutures {
 
@@ -19,7 +20,7 @@ class CoreProcessorsSpec extends AnyWordSpec with Matchers with ScalaFutures {
 
   "ThrottleProcessor" should {
     "delay requests" in {
-      val throttle = new ThrottleProcessor(50, global = false)
+      val throttle = new ThrottleProcessor(50)
       val session = Session(requestBody = "test")
 
       val start = System.currentTimeMillis()
@@ -66,71 +67,119 @@ class CoreProcessorsSpec extends AnyWordSpec with Matchers with ScalaFutures {
     }
   }
 
-  "CacheProcessor" should {
+  "HeaderProcessor" should {
+    "remove and add request headers" in {
+      val hp = new HeaderProcessor(
+        removeRequest = Set("timeout-access", "host"),
+        addRequest = Map("Content-Type" -> "application/json")
+      )
+
+      val session = Session(
+        requestBody = "test",
+        requestHeaders = Seq(
+          RawHeader("Host", "example.com"),
+          RawHeader("Timeout-Access", "1"),
+          RawHeader("X-Keep", "ok")
+        )
+      )
+
+      val result = Await.result(hp.process(session), 5.seconds)
+
+      result.requestHeaders.exists(_.is("host")) shouldBe false
+      result.requestHeaders.exists(_.is("timeout-access")) shouldBe false
+      result.requestHeaders.exists(_.is("x-keep")) shouldBe true
+
+      // Content-Type is an entity attribute in Akka HTTP; it is stored in session data for HttpProcessor.
+      result.requestHeaders.exists(_.is("content-type")) shouldBe false
+      result.getData[String]("http.contentType") shouldBe Some("application/json")
+    }
+  }
+
+  "Rpc3Processor" should {
     "cache and retrieve responses" in {
-      val cacheProc = CacheRpc3Processor.expire(ttl = 30000L, ttlLatest = 12000L)
+      val cacheProc = Rpc3Processor.expire(ttl = 30000L, ttlLatest = 12000L)
 
       val request = """{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}"""
       val response = """{"jsonrpc":"2.0","result":"0x1234","id":1}"""
 
-      // First request - cache miss (request phase)
-      val session1 = Session(requestBody = request)
-      val afterReq1 = Await.result(cacheProc.process(session1), 5.seconds)
-      afterReq1.getData[Boolean]("fromCache") shouldBe Some(false)
-      afterReq1.responseBody shouldBe None
+      var backendCalls = 0
+      val backend = new RequestProcessor {
+        override val name: String = "Backend"
+        override def processRequest(session: Session): Future[Session] = {
+          backendCalls += 1
+          Future.successful(session.withResponse(response, ResponseSource.REMOTE))
+        }
+      }
 
-      // Simulate downstream setting response
-      val withResponse = afterReq1.withResponse(response, ProxyData.REMOTE)
+      val pipeline = ProcessorPipeline.fromSeq(Seq(cacheProc, backend), "CacheTest")
 
-      // Response phase - cache the response
-      val afterResp1 = Await.result(cacheProc.process(withResponse), 5.seconds)
+      // First call - backend
+      val r1 = Await.result(pipeline.process(Session(requestBody = request)), 5.seconds)
+      r1.responseSource shouldBe ResponseSource.REMOTE
+      backendCalls shouldBe 1
 
-      // Second request - cache hit
-      val session2 = Session(requestBody = request)
-      val afterReq2 = Await.result(cacheProc.process(session2), 5.seconds)
-
-      afterReq2.getData[Boolean]("fromCache") shouldBe Some(true)
-      afterReq2.responseBody shouldBe Some(response)
-      afterReq2.responseSource shouldBe ProxyData.CACHE
-      afterReq2.getData[Boolean]("cacheHit") shouldBe Some(true)
+      // Second call - cache
+      val r2 = Await.result(pipeline.process(Session(requestBody = request)), 5.seconds)
+      r2.responseSource shouldBe ResponseSource.CACHE
+      r2.responseBody shouldBe Some(response)
+      r2.getData[Boolean]("cacheHit") shouldBe Some(true)
+      backendCalls shouldBe 1
     }
 
     "skip caching for error responses" in {
-      val cacheProc = CacheRpc3Processor.expire()
+      val cacheProc = Rpc3Processor.expire()
 
       val request = """{"jsonrpc":"2.0","method":"eth_getBalance","params":["0x123"],"id":1}"""
       val errorResponse = """{"jsonrpc":"2.0","error":{"code":-32000,"message":"Error"},"id":1}"""
 
-      // Request phase
-      val session = Session(requestBody = request)
-      val afterReq = Await.result(cacheProc.process(session), 5.seconds)
+      var backendCalls = 0
+      val backend = new RequestProcessor {
+        override val name: String = "Backend"
+        override def processRequest(session: Session): Future[Session] = {
+          backendCalls += 1
+          Future.successful(session.withResponse(errorResponse, ResponseSource.REMOTE))
+        }
+      }
 
-      // Simulate response with error
-      val withResponse = afterReq.withResponse(errorResponse, ProxyData.REMOTE)
-      val afterResp = Await.result(cacheProc.process(withResponse), 5.seconds)
+      val pipeline = ProcessorPipeline.fromSeq(Seq(cacheProc, backend), "CacheErrorTest")
 
-      // Try to retrieve - should be cache miss (error wasn't cached)
-      val session2 = Session(requestBody = request)
-      val afterReq2 = Await.result(cacheProc.process(session2), 5.seconds)
-      afterReq2.getData[Boolean]("fromCache") shouldBe Some(false)
+      Await.result(pipeline.process(Session(requestBody = request)), 5.seconds)
+      Await.result(pipeline.process(Session(requestBody = request)), 5.seconds)
+
+      // Error responses are not cached => backend called twice
+      backendCalls shouldBe 2
     }
 
     "skip caching for batch requests" in {
-      val cacheProc = CacheRpc3Processor.expire()
+      val cacheProc = Rpc3Processor.expire()
 
       val batchRequest = """[{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}]"""
+      val ok = """[{"jsonrpc":"2.0","result":"0x1","id":1}]"""
 
-      val session = Session(requestBody = batchRequest)
-      val result = Await.result(cacheProc.process(session), 5.seconds)
+      var backendCalls = 0
+      val backend = new RequestProcessor {
+        override val name: String = "Backend"
+        override def processRequest(session: Session): Future[Session] = {
+          backendCalls += 1
+          Future.successful(session.withResponse(ok, ResponseSource.REMOTE))
+        }
+      }
 
-      result.responseBody shouldBe None // Should not process batch requests
+      val pipeline = ProcessorPipeline.fromSeq(Seq(cacheProc, backend), "CacheBatchTest")
+
+      val r1 = Await.result(pipeline.process(Session(requestBody = batchRequest)), 5.seconds)
+      r1.responseSource shouldBe ResponseSource.REMOTE
+
+      val r2 = Await.result(pipeline.process(Session(requestBody = batchRequest)), 5.seconds)
+      r2.responseSource shouldBe ResponseSource.CACHE
+      backendCalls shouldBe 1
     }
   }
 
-  "LoadBalancerProcessor" should {
+  "PoolProcessor" should {
     "select destination from pool" in {
       val destinations = Seq("http://localhost:8545", "http://localhost:8546")
-      val lb = LoadBalancerProcessor.sticky(destinations)
+      val lb = PoolProcessor.sticky(destinations)
 
       val session = Session(requestBody = "test")
       val result = Await.result(lb.process(session), 5.seconds)
@@ -142,18 +191,18 @@ class CoreProcessorsSpec extends AnyWordSpec with Matchers with ScalaFutures {
 
     "filter destinations by pool" in {
       val destinations = Seq("openai:https://api.openai.com/v1", "anthropic:https://api.anthropic.com/v1")
-      val lb = LoadBalancerProcessor.sticky(destinations)
+      val lb = PoolProcessor.sticky(destinations)
 
       val session = Session(requestBody = "test").putData("pool", "openai")
       val result = Await.result(lb.process(session), 5.seconds)
 
-      result.getData[String]("destination") shouldBe Some("openai:https://api.openai.com/v1")
+      result.getData[String]("destination") shouldBe Some("https://api.openai.com/v1")
       result.isRejected shouldBe false
     }
 
     "reject when no destinations available for pool" in {
       val destinations = Seq()
-      val lb = LoadBalancerProcessor.sticky(destinations)
+      val lb = PoolProcessor.sticky(destinations)
 
       val session = Session(requestBody = "test").putData("pool", "nonexistent")
       val result = Await.result(lb.process(session), 5.seconds)
@@ -164,11 +213,11 @@ class CoreProcessorsSpec extends AnyWordSpec with Matchers with ScalaFutures {
 
     "skip load balancing for cached responses" in {
       val destinations = Seq("http://localhost:8545")
-      val lb = LoadBalancerProcessor.sticky(destinations)
+      val lb = PoolProcessor.sticky(destinations)
 
       // Session with response already set (from cache)
       val session = Session(requestBody = "test")
-        .withResponse("cached", ProxyData.CACHE)
+        .withResponse("cached", ResponseSource.CACHE)
         .putData("fromCache", true)
         .putData("cacheHit", true)
 
@@ -177,25 +226,106 @@ class CoreProcessorsSpec extends AnyWordSpec with Matchers with ScalaFutures {
       result.getData[String]("destination") shouldBe None // Should skip
       result.responseBody shouldBe Some("cached")
     }
+
+    "fail over across destinations (wrap-around) until success (sticky)" in {
+      val destinations = Seq("A", "B", "C")
+      val pool = PoolProcessor.sticky(destinations)
+
+      var calls = 0
+      val backend = new RequestProcessor {
+        override val name: String = "Backend"
+        override def processRequest(session: Session): Future[Session] = {
+          calls += 1
+          session.getData[String]("destination") match {
+            case Some("C") => Future.successful(session.withResponse("ok", ResponseSource.REMOTE))
+            case Some(d)   => Future.successful(session.reject(-1, s"fail:$d", name))
+            case None      => Future.successful(session.reject(-1, "no-destination", name))
+          }
+        }
+      }
+
+      val pipeline = ProcessorPipeline.fromSeq(Seq(pool, backend), "PoolFailoverSticky")
+      val r = Await.result(pipeline.process(Session(requestBody = "test")), 5.seconds)
+      r.isRejected shouldBe false
+      r.responseBody shouldBe Some("ok")
+      calls shouldBe 3 // A, B, C
+    }
+
+    "sticky should start from last successful destination on next request" in {
+      val destinations = Seq("A", "B", "C")
+      val pool = PoolProcessor.sticky(destinations)
+
+      var calls = 0
+      val backend = new RequestProcessor {
+        override val name: String = "Backend"
+        override def processRequest(session: Session): Future[Session] = {
+          calls += 1
+          session.getData[String]("destination") match {
+            case Some("B") => Future.successful(session.withResponse("ok", ResponseSource.REMOTE))
+            case Some(d)   => Future.successful(session.reject(-1, s"fail:$d", name))
+            case None      => Future.successful(session.reject(-1, "no-destination", name))
+          }
+        }
+      }
+
+      val pipeline = ProcessorPipeline.fromSeq(Seq(pool, backend), "PoolStickyMemory")
+
+      val r1 = Await.result(pipeline.process(Session(requestBody = "test-1")), 5.seconds)
+      r1.isRejected shouldBe false
+      calls shouldBe 2 // A then B
+
+      val r2 = Await.result(pipeline.process(Session(requestBody = "test-2")), 5.seconds)
+      r2.isRejected shouldBe false
+      calls shouldBe 3 // starts at B => 1 more call
+    }
+
+    "lb should start from next after last successful destination on next request" in {
+      val destinations = Seq("A", "B", "C")
+      val pool = new PoolProcessor(destinations, new LoadBalancerStrategy)
+
+      var calls = 0
+      val backend = new RequestProcessor {
+        override val name: String = "Backend"
+        override def processRequest(session: Session): Future[Session] = {
+          calls += 1
+          session.getData[String]("destination") match {
+            case Some("B") => Future.successful(session.withResponse("ok", ResponseSource.REMOTE))
+            case Some(d)   => Future.successful(session.reject(-1, s"fail:$d", name))
+            case None      => Future.successful(session.reject(-1, "no-destination", name))
+          }
+        }
+      }
+
+      val pipeline = ProcessorPipeline.fromSeq(Seq(pool, backend), "PoolLbMemory")
+
+      val r1 = Await.result(pipeline.process(Session(requestBody = "test-1")), 5.seconds)
+      r1.isRejected shouldBe false
+      calls shouldBe 2 // A then B
+
+      // After success at B, LB starts at C next time => C, A, B
+      val r2 = Await.result(pipeline.process(Session(requestBody = "test-2")), 5.seconds)
+      r2.isRejected shouldBe false
+      calls shouldBe 5 // +3 calls
+    }
   }
 
-  "HttpClientProcessor" should {
+  "HttpProcessor" should {
     "reject when no destination set" in {
-      val http = HttpClientProcessor("")
+      val http = new HttpProcessor()
 
       val session = Session(requestBody = "test")
       val result = Await.result(http.process(session), 5.seconds)
 
       result.isRejected shouldBe true
-      result.rejection.get.processorName shouldBe "HttpClient"
+      result.rejection.get.processorName shouldBe "Http"
       result.rejection.get.message should include("No destination")
     }
 
     "skip HTTP request when response already set" in {
-      val http = HttpClientProcessor("")
+      val http = new HttpProcessor()
 
       val session = Session(requestBody = "test")
-        .withResponse("already set", ProxyData.CACHE)
+        .withResponse("already set", ResponseSource.CACHE)
         .putData("destination", "http://localhost:8545")
 
       val result = Await.result(http.process(session), 5.seconds)
@@ -208,8 +338,8 @@ class CoreProcessorsSpec extends AnyWordSpec with Matchers with ScalaFutures {
   "Full pipeline with core processors" should {
     "process request through cache, load balancer, timeout" in {
       val destinations = Seq("http://localhost:8545")
-      val cache = CacheRpc3Processor.expire()
-      val lb = LoadBalancerProcessor.sticky(destinations)
+      val cache = CacheProcessor.expire()
+      val lb = PoolProcessor.sticky(destinations)
       val timeout = new TimeoutProcessor(5000)
 
       val pipeline = ProcessorPipeline.fromSeq(Seq(cache, timeout, lb), "TestPipeline")

@@ -1,9 +1,10 @@
 package io.syspulse.ika.processor
 
 import java.util.Locale
+import java.util.concurrent.atomic.AtomicInteger
 
 import akka.http.scaladsl.model.HttpHeader
-import io.syspulse.ika.store.ProxyData
+import akka.http.scaladsl.model.{ContentType, ContentTypes, StatusCode, StatusCodes}
 
 /**
  * Session state controls pipeline flow.
@@ -68,7 +69,9 @@ case class Session private[processor] (
   // Response data
   responseBody: Option[String],
   responseHeaderMap: Map[String, HttpHeader],
-  responseSource: ProxyData.Source,
+  responseSource: ResponseSource.Source,
+  responseStatus: StatusCode,
+  responseContentType: ContentType,
 
   // Pipeline control
   state: SessionState.SessionState,
@@ -81,7 +84,12 @@ case class Session private[processor] (
 
   // Timing data (for telemetry)
   startTime: Long,
-  endTime: Option[Long]
+  endTime: Option[Long],
+
+  // Pipeline execution cursor (mutable, thread-safe)
+  cursor: AtomicInteger,
+  // Pipeline processors list for next() dispatch
+  pipeline: Seq[Processor]
 ) {
 
   /** All request headers (order not specified). */
@@ -139,6 +147,13 @@ case class Session private[processor] (
   }
 
   /**
+   * Remove processor-specific data.
+   */
+  def removeData(key: String): Session = {
+    copy(processorData = processorData - key)
+  }
+
+  /**
    * Update request body (for upstream processors to modify before HTTP)
    */
   def withRequestBody(body: String): Session = {
@@ -176,13 +191,28 @@ case class Session private[processor] (
   }
 
   /**
+   * Remove a response header by field name (case-insensitive).
+   */
+  def removeResponseHeader(name: String): Session = {
+    copy(responseHeaderMap = responseHeaderMap - name.toLowerCase(Locale.ROOT))
+  }
+
+  /**
    * Set response data
    */
-  def withResponse(body: String, source: ProxyData.Source = ProxyData.REMOTE, headers: Seq[HttpHeader] = Seq.empty): Session = {
+  def withResponse(
+    body: String,
+    source: ResponseSource.Source = ResponseSource.REMOTE,
+    status: StatusCode = StatusCodes.OK,
+    headers: Seq[HttpHeader] = Seq.empty,
+    contentType: ContentType = ContentTypes.`application/json`
+  ): Session = {
     copy(
       responseBody = Some(body),
       responseSource = source,
-      responseHeaderMap = Session.headersFromSeq(headers)
+      responseStatus = status,
+      responseHeaderMap = Session.headersFromSeq(headers),
+      responseContentType = contentType
     )
   }
 
@@ -196,7 +226,7 @@ case class Session private[processor] (
   /**
    * Set response source
    */
-  def withResponseSource(source: ProxyData.Source): Session = {
+  def withResponseSource(source: ResponseSource.Source): Session = {
     copy(responseSource = source)
   }
 
@@ -214,15 +244,22 @@ case class Session private[processor] (
     endTime.getOrElse(System.currentTimeMillis()) - startTime
   }
 
-  /**
-   * Create a ProxyData from this session's response
-   */
-  def toProxyData: ProxyData = {
-    ProxyData(
-      body = responseBody.getOrElse(""),
-      src = responseSource
-    )
+  /** Set pipeline processors and reset cursor to before the first processor. */
+  def withPipeline(processors: Seq[Processor]): Session =
+    copy(pipeline = processors, cursor = new AtomicInteger(-1))
+
+  /** Set cursor to a specific processor index (used by retry logic). */
+  def withCursor(i: Int): Session = {
+    cursor.set(i)
+    this
   }
+
+  /** Get the next processor based on cursor; advances cursor atomically. */
+  def nextProcessor: Option[Processor] = {
+    val nextIdx = cursor.incrementAndGet()
+    pipeline.lift(nextIdx)
+  }
+
 }
 
 object Session {
@@ -242,12 +279,16 @@ object Session {
     requestHeaders: Seq[HttpHeader] = Seq.empty,
     responseBody: Option[String] = None,
     responseHeaders: Seq[HttpHeader] = Seq.empty,
-    responseSource: ProxyData.Source = ProxyData.LOCAL,
+    responseSource: ResponseSource.Source = ResponseSource.LOCAL,
+    responseStatus: StatusCode = StatusCodes.OK,
+    responseContentType: ContentType = ContentTypes.`application/json`,
     state: SessionState.SessionState = SessionState.CONTINUE,
     rejection: Option[Rejection] = None,
     processorData: Map[String, Any] = Map.empty,
     startTime: Long = System.currentTimeMillis(),
-    endTime: Option[Long] = None
+    endTime: Option[Long] = None,
+    cursor: AtomicInteger = new AtomicInteger(-1),
+    pipeline: Seq[Processor] = Seq.empty
   ): Session =
     new Session(
       requestBody,
@@ -255,10 +296,14 @@ object Session {
       responseBody,
       headersFromSeq(responseHeaders),
       responseSource,
+      responseStatus,
+      responseContentType,
       state,
       rejection,
       processorData,
       startTime,
-      endTime
+      endTime,
+      cursor,
+      pipeline
     )
 }

@@ -4,12 +4,12 @@ import scala.concurrent.{Future, ExecutionContext}
 import scala.concurrent.duration._
 import com.typesafe.scalalogging.Logger
 import akka.actor.ActorSystem
-import akka.http.scaladsl.model.HttpHeader
+import akka.http.scaladsl.model.{HttpHeader, HttpMethod}
 
 import io.syspulse.ika.Config
 import io.syspulse.ika.processor.{Session, ProcessorPipeline}
-import io.syspulse.ika.processor.util.ProcessorConfig
 import io.syspulse.ika.processor.util.ProcessorPipelineBuilder
+import com.typesafe.config.ConfigFactory
 
 /**
  * ProxyStorePipeline implements the ProxyStore trait using the processor pipeline architecture.
@@ -25,7 +25,7 @@ import io.syspulse.ika.processor.util.ProcessorPipelineBuilder
  */
 class ProxyStorePipeline(
   val pipeline: ProcessorPipeline,
-  val profile: String = "web3"
+  val profile: String
 )(implicit ec: ExecutionContext) extends ProxyStore {
 
   private val log = Logger(s"${this}")
@@ -36,54 +36,26 @@ class ProxyStorePipeline(
   /**
    * process request
    */
-  def proxy(req: String, headers: Seq[HttpHeader]): Future[ProxyData] = {
+  def proxy(method: HttpMethod, uriSuffix: String, req: String, headers: Seq[HttpHeader]): Future[Session] = {
     log.debug(s"Processing request: ${req.take(100)}...")
 
     // Create initial session
     val session = Session(
       requestBody = req,
       requestHeaders = headers
-    )
+    ).putData("http.method", method.value)
+      .putData("http.uriSuffix", uriSuffix)
 
     // Execute pipeline
     pipeline.process(session).map { resultSession =>
-      // Extract response from session
-      // Note: RejectionProcessor in the pipeline has already converted rejections to response body
-      resultSession.responseBody match {
-        case Some(body) =>
-          val cacheHit = resultSession.getData[Boolean]("cacheHit").getOrElse(false)
-          val httpStatus = resultSession.getData[Int]("httpStatusCode")
-
-          if (resultSession.isRejected) {
-            val rejection = resultSession.rejection.get
-            log.warn(s"Request rejected by ${rejection.processorName}: ${rejection.message}, HTTP status: ${httpStatus.getOrElse("default")}")
-          } else {
-            log.debug(s"Request completed successfully. Source: ${resultSession.responseSource}, Cache hit: ${cacheHit}, Duration: ${resultSession.durationMs}ms")
-          }
-
-          // Note: httpStatusCode in processorData could be used by routes to set HTTP response status
-          // For now, ProxyData doesn't support it, but it's available in the session
-          ProxyData(
-            body = body,
-            src = resultSession.responseSource
-          )
-
-        case None =>
-          // This shouldn't happen if pipeline is configured correctly (RejectionProcessor should set response)
-          log.error("Pipeline completed but no response body set")
-          ProxyData(
-            body = """{"jsonrpc": "2.0", "error": {"code": -32603, "message": "No response from pipeline"}, "id": null}""",
-            src = ProxyData.LOCAL
-          )
-      }
-    }.recover {
-      case ex: Exception =>
-        // Unhandled exception (shouldn't happen if RetryProcessor and RejectionProcessor are in pipeline)
-        log.error(s"Pipeline execution failed: ${ex.getMessage}", ex)
-        ProxyData(
-          body = s"""{"jsonrpc": "2.0", "error": {"code": -32603, "message": "Pipeline error: ${ex.getMessage}"}, "id": null}""",
-          src = ProxyData.LOCAL
-        )
+      val cacheHit = resultSession.getData[Boolean]("cacheHit").getOrElse(false)
+      log.debug(s"Request completed. Source: ${resultSession.responseSource}, Cache hit: ${cacheHit}, Rejected: ${resultSession.isRejected}, Duration: ${resultSession.durationMs}ms")
+      resultSession
+    }.recover { case ex: Exception =>
+      log.error(s"Pipeline execution failed: ${ex.getMessage}", ex)
+      Session(requestBody = req, requestHeaders = headers)
+        .reject(code = -32603, message = s"Pipeline error: ${ex.getMessage}", processorName = "ProxyStorePipeline")
+        .withResponse(s"""{"jsonrpc": "2.0", "error": {"code": -32603, "message": "Pipeline error: ${ex.getMessage}"}, "id": null}""")
     }
   }
 
@@ -92,23 +64,19 @@ class ProxyStorePipeline(
 
 object ProxyStorePipeline {
   /**
-   * Create a ProxyStorePipeline with the default web3 profile
+   * Create a ProxyStorePipeline with default profile.
    */
   def apply()(implicit config: Config, ec: ExecutionContext, actorSystem: ActorSystem): ProxyStorePipeline = {
-    apply("web3")
+    apply("proxy")
   }
 
   /**
    * Create a ProxyStorePipeline with a specific profile
    */
   def apply(profile: String)(implicit config: Config, ec: ExecutionContext, actorSystem: ActorSystem): ProxyStorePipeline = {
-    val builder = ProcessorPipelineBuilder(
-      destinations = config.destinations,
-      processorConfig = ProcessorConfig.default,
-      poolStrategy = "sticky",
-      cacheUri = "rpc3://"  // TODO: get from config
-    )(ec, actorSystem)
-    val pipeline = builder.build(profile)
+    // Profiles are user-defined in application.conf under `profile.<name>`
+    val cfg = ConfigFactory.load().resolve()
+    val pipeline = ProcessorPipelineBuilder.fromProfile(cfg, profile)(ec, actorSystem)
     new ProxyStorePipeline(pipeline, profile)
   }
 

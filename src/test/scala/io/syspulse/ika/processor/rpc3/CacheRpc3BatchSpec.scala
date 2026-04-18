@@ -12,8 +12,8 @@ import spray.json._
 
 import akka.actor.ActorSystem
 import io.syspulse.ika.processor.{Session, ProcessorPipeline}
-import io.syspulse.ika.processor.impl.HttpClientProcessor
-import io.syspulse.ika.store.ProxyData
+import io.syspulse.ika.processor.impl.HttpProcessor
+import io.syspulse.ika.processor.ResponseSource
 
 class CacheRpc3BatchSpec extends AnyWordSpec with Matchers with ScalaFutures {
 
@@ -25,7 +25,7 @@ class CacheRpc3BatchSpec extends AnyWordSpec with Matchers with ScalaFutures {
     PatienceConfig(timeout = 3.seconds, interval = 25.millis)
 
   /** Project `test/` directory (see `build.sbt` / `-Duser.dir` for runs). */
-  private val testDir = Paths.get(System.getProperty("user.dir"), "test")
+  private val testDir = Paths.get(System.getProperty("user.dir"), "test", "rpc3")
 
   private def loadTestFixture(name: String): String =
     Source.fromFile(testDir.resolve(name).toFile, "UTF-8").mkString.trim
@@ -67,100 +67,100 @@ class CacheRpc3BatchSpec extends AnyWordSpec with Matchers with ScalaFutures {
   /**
    * Create a mock HTTP processor that responds with OK for each request ID
    */
-  def mockHttpProcessor()(implicit ec: ExecutionContext, actorSystem: ActorSystem): HttpClientProcessor = {
-    new HttpClientProcessor(compression = "") {
+  def mockHttpProcessor()(implicit ec: ExecutionContext, actorSystem: ActorSystem): HttpProcessor = {
+    new HttpProcessor(compression = "") {
       override def processRequest(session: Session): Future[Session] = {
         val req = session.requestBody
         val ids = req.parseJson.asInstanceOf[JsArray].elements.map(_.asJsObject.fields("id"))
         val response = JsArray(ids.map(mkOkRes).toVector).compactPrint
 
-        Future.successful(session.withResponse(response, ProxyData.REMOTE))
+        Future.successful(session.withResponse(response, ResponseSource.REMOTE))
       }
     }
   }
 
-  "CacheRpc3Processor.batch" should {
+  "Rpc3Processor.batch" should {
 
     "handle empty batch (no http calls)" in {
-      val cache = CacheRpc3Processor.expire(ttl = 30000L)
+      val cache = Rpc3Processor.expire(ttl = 30000L)
       var httpCalls = 0
 
-      val http = new HttpClientProcessor(compression = "") {
+      val http = new HttpProcessor(compression = "") {
         override def processRequest(session: Session): Future[Session] = {
           httpCalls += 1
-          Future.successful(session.withResponse("[]", ProxyData.REMOTE))
+          Future.successful(session.withResponse("[]", ResponseSource.REMOTE))
         }
       }
 
-      // Cache processor appears twice: before HTTP (request phase) and after HTTP (response phase)
-      val pipeline = ProcessorPipeline.fromSeq(Seq(cache, http, cache), "TestPipeline")
+      // Cache processor calls downstream itself (request+response in one pass)
+      val pipeline = ProcessorPipeline.fromSeq(Seq(cache, http), "TestPipeline")
       val session = Session(requestBody = "[]")
 
       val result = pipeline.process(session).futureValue
 
       result.responseBody shouldBe Some("[]")
-      result.responseSource shouldBe ProxyData.CACHE
+      result.responseSource shouldBe ResponseSource.CACHE
       httpCalls shouldBe 0
     }
 
     "handle single item in batch (and cache on second call)" in {
-      val cache = CacheRpc3Processor.expire(ttl = 30000L)
+      val cache = Rpc3Processor.expire(ttl = 30000L)
       var httpCalls = 0
 
       val http = mockHttpProcessor()
-      val httpCounted = new HttpClientProcessor(compression = "") {
+      val httpCounted = new HttpProcessor(compression = "") {
         override def processRequest(session: Session): Future[Session] = {
           httpCalls += 1
           http.process(session)
         }
       }
 
-      // Cache processor appears twice: before HTTP (request phase) and after HTTP (response phase)
-      val pipeline = ProcessorPipeline.fromSeq(Seq(cache, httpCounted, cache), "TestPipeline")
+      // Cache processor calls downstream itself (request+response in one pass)
+      val pipeline = ProcessorPipeline.fromSeq(Seq(cache, httpCounted), "TestPipeline")
       val req = s"[${mkReq(1)}]"
 
       // First call - should hit HTTP
       val result1 = pipeline.process(Session(requestBody = req)).futureValue
-      result1.responseSource shouldBe ProxyData.REMOTE
+      result1.responseSource shouldBe ResponseSource.REMOTE
       httpCalls shouldBe 1
 
       // Second call - should be cached
       val result2 = pipeline.process(Session(requestBody = req)).futureValue
-      result2.responseSource shouldBe ProxyData.CACHE
+      result2.responseSource shouldBe ResponseSource.CACHE
       httpCalls shouldBe 1  // Still 1, no additional HTTP call
     }
 
     "handle multiple items in batch (and cache on second call)" in {
-      val cache = CacheRpc3Processor.expire(ttl = 30000L)
+      val cache = Rpc3Processor.expire(ttl = 30000L)
       var httpCalls = 0
 
       val http = mockHttpProcessor()
-      val httpCounted = new HttpClientProcessor(compression = "") {
+      val httpCounted = new HttpProcessor(compression = "") {
         override def processRequest(session: Session): Future[Session] = {
           httpCalls += 1
           http.process(session)
         }
       }
 
-      // Cache processor appears twice: before HTTP (request phase) and after HTTP (response phase)
-      val pipeline = ProcessorPipeline.fromSeq(Seq(cache, httpCounted, cache), "TestPipeline")
+      // Cache processor calls downstream itself (request+response in one pass)
+      val pipeline = ProcessorPipeline.fromSeq(Seq(cache, httpCounted), "TestPipeline")
       val req = s"[${mkReq(1)},${mkReq(2)},${mkReq(3)}]"
 
       // First call - should hit HTTP
       val result1 = pipeline.process(Session(requestBody = req)).futureValue
-      result1.responseSource shouldBe ProxyData.REMOTE
+      result1.responseSource shouldBe ResponseSource.REMOTE
       httpCalls shouldBe 1
 
       // Second call - should be cached
       val result2 = pipeline.process(Session(requestBody = req)).futureValue
-      result2.responseSource shouldBe ProxyData.CACHE
+      result2.responseSource shouldBe ResponseSource.CACHE
       httpCalls shouldBe 1  // Still 1, no additional HTTP call
     }
 
     "fail on missing response element in batch (size mismatch)" in {
-      val cache = CacheRpc3Processor.expire(ttl = 30000L)
+      val cache = Rpc3Processor.expire(ttl = 30000L)
 
-      val http = new HttpClientProcessor(compression = "") {
+      val http = new HttpProcessor(compression = "") {
         override def processRequest(session: Session): Future[Session] = {
           val req = session.requestBody
           val ids = req.parseJson.asInstanceOf[JsArray].elements.map(_.asJsObject.fields("id"))
@@ -168,12 +168,12 @@ class CacheRpc3BatchSpec extends AnyWordSpec with Matchers with ScalaFutures {
           val dropped = ids.dropRight(1)
           val response = JsArray(dropped.map(mkOkRes).toVector).compactPrint
 
-          Future.successful(session.withResponse(response, ProxyData.REMOTE))
+          Future.successful(session.withResponse(response, ResponseSource.REMOTE))
         }
       }
 
-      // Cache processor appears twice: before HTTP (request phase) and after HTTP (response phase)
-      val pipeline = ProcessorPipeline.fromSeq(Seq(cache, http, cache), "TestPipeline")
+      // Cache processor calls downstream itself (request+response in one pass)
+      val pipeline = ProcessorPipeline.fromSeq(Seq(cache, http), "TestPipeline")
       val req = s"[${mkReq(1)},${mkReq(2)}]"
 
       val result = pipeline.process(Session(requestBody = req)).futureValue
@@ -183,21 +183,21 @@ class CacheRpc3BatchSpec extends AnyWordSpec with Matchers with ScalaFutures {
     }
 
     "fail when the first response item is missing" in {
-      val cache = CacheRpc3Processor.expire(ttl = 30000L)
+      val cache = Rpc3Processor.expire(ttl = 30000L)
 
-      val http = new HttpClientProcessor(compression = "") {
+      val http = new HttpProcessor(compression = "") {
         override def processRequest(session: Session): Future[Session] = {
           val req = session.requestBody
           val ids = req.parseJson.asInstanceOf[JsArray].elements.map(_.asJsObject.fields("id"))
           val droppedFirst = ids.drop(1)
           val response = JsArray(droppedFirst.map(mkOkRes).toVector).compactPrint
 
-          Future.successful(session.withResponse(response, ProxyData.REMOTE))
+          Future.successful(session.withResponse(response, ResponseSource.REMOTE))
         }
       }
 
       // Cache processor appears twice: before HTTP (request phase) and after HTTP (response phase)
-      val pipeline = ProcessorPipeline.fromSeq(Seq(cache, http, cache), "TestPipeline")
+      val pipeline = ProcessorPipeline.fromSeq(Seq(cache, http), "TestPipeline")
       val req = s"[${mkReq(1)},${mkReq(2)},${mkReq(3)}]"
 
       val result = pipeline.process(Session(requestBody = req)).futureValue
@@ -206,9 +206,9 @@ class CacheRpc3BatchSpec extends AnyWordSpec with Matchers with ScalaFutures {
     }
 
     "fail when a middle response item is missing" in {
-      val cache = CacheRpc3Processor.expire(ttl = 30000L)
+      val cache = Rpc3Processor.expire(ttl = 30000L)
 
-      val http = new HttpClientProcessor(compression = "") {
+      val http = new HttpProcessor(compression = "") {
         override def processRequest(session: Session): Future[Session] = {
           val req = session.requestBody
           val ids = req.parseJson.asInstanceOf[JsArray].elements.map(_.asJsObject.fields("id")).toVector
@@ -216,12 +216,12 @@ class CacheRpc3BatchSpec extends AnyWordSpec with Matchers with ScalaFutures {
           val kept = ids.zipWithIndex.collect { case (v, i) if i != 1 => v }
           val response = JsArray(kept.map(mkOkRes)).compactPrint
 
-          Future.successful(session.withResponse(response, ProxyData.REMOTE))
+          Future.successful(session.withResponse(response, ResponseSource.REMOTE))
         }
       }
 
       // Cache processor appears twice: before HTTP (request phase) and after HTTP (response phase)
-      val pipeline = ProcessorPipeline.fromSeq(Seq(cache, http, cache), "TestPipeline")
+      val pipeline = ProcessorPipeline.fromSeq(Seq(cache, http), "TestPipeline")
       val req = s"[${mkReq(1)},${mkReq(2)},${mkReq(3)}]"
 
       val result = pipeline.process(Session(requestBody = req)).futureValue
@@ -230,21 +230,21 @@ class CacheRpc3BatchSpec extends AnyWordSpec with Matchers with ScalaFutures {
     }
 
     "fail when the last response item is missing" in {
-      val cache = CacheRpc3Processor.expire(ttl = 30000L)
+      val cache = Rpc3Processor.expire(ttl = 30000L)
 
-      val http = new HttpClientProcessor(compression = "") {
+      val http = new HttpProcessor(compression = "") {
         override def processRequest(session: Session): Future[Session] = {
           val req = session.requestBody
           val ids = req.parseJson.asInstanceOf[JsArray].elements.map(_.asJsObject.fields("id"))
           val droppedLast = ids.dropRight(1)
           val response = JsArray(droppedLast.map(mkOkRes).toVector).compactPrint
 
-          Future.successful(session.withResponse(response, ProxyData.REMOTE))
+          Future.successful(session.withResponse(response, ResponseSource.REMOTE))
         }
       }
 
       // Cache processor appears twice: before HTTP (request phase) and after HTTP (response phase)
-      val pipeline = ProcessorPipeline.fromSeq(Seq(cache, http, cache), "TestPipeline")
+      val pipeline = ProcessorPipeline.fromSeq(Seq(cache, http), "TestPipeline")
       val req = s"[${mkReq(1)},${mkReq(2)},${mkReq(3)}]"
 
       val result = pipeline.process(Session(requestBody = req)).futureValue
@@ -253,9 +253,9 @@ class CacheRpc3BatchSpec extends AnyWordSpec with Matchers with ScalaFutures {
     }
 
     "fail when multiple response items are missing" in {
-      val cache = CacheRpc3Processor.expire(ttl = 30000L)
+      val cache = Rpc3Processor.expire(ttl = 30000L)
 
-      val http = new HttpClientProcessor(compression = "") {
+      val http = new HttpProcessor(compression = "") {
         override def processRequest(session: Session): Future[Session] = {
           val req = session.requestBody
           val ids = req.parseJson.asInstanceOf[JsArray].elements.map(_.asJsObject.fields("id")).toVector
@@ -263,12 +263,12 @@ class CacheRpc3BatchSpec extends AnyWordSpec with Matchers with ScalaFutures {
           val kept = ids.take(1)
           val response = JsArray(kept.map(mkOkRes)).compactPrint
 
-          Future.successful(session.withResponse(response, ProxyData.REMOTE))
+          Future.successful(session.withResponse(response, ResponseSource.REMOTE))
         }
       }
 
       // Cache processor appears twice: before HTTP (request phase) and after HTTP (response phase)
-      val pipeline = ProcessorPipeline.fromSeq(Seq(cache, http, cache), "TestPipeline")
+      val pipeline = ProcessorPipeline.fromSeq(Seq(cache, http), "TestPipeline")
       val req = s"[${mkReq(1)},${mkReq(2)},${mkReq(3)},${mkReq(4)}]"
 
       val result = pipeline.process(Session(requestBody = req)).futureValue
@@ -278,22 +278,22 @@ class CacheRpc3BatchSpec extends AnyWordSpec with Matchers with ScalaFutures {
 
     "assemble batch from mix of cached and fresh responses (preserving order)" in {
       def runCase(allIds: Vector[Int], cachedIds: Set[Int]): Unit = {
-        val cache = CacheRpc3Processor.expire(ttl = 30000L)
+        val cache = Rpc3Processor.expire(ttl = 30000L)
         var httpCalls = 0
 
-        val http = new HttpClientProcessor(compression = "") {
+        val http = new HttpProcessor(compression = "") {
           override def processRequest(session: Session): Future[Session] = {
             httpCalls += 1
             val req = session.requestBody
             val ids = req.parseJson.asInstanceOf[JsArray].elements.map(_.asJsObject.fields("id"))
             val response = JsArray(ids.map(mkOkRes).toVector).compactPrint
 
-            Future.successful(session.withResponse(response, ProxyData.REMOTE))
+            Future.successful(session.withResponse(response, ResponseSource.REMOTE))
           }
         }
 
         // Cache processor appears twice: before HTTP (request phase) and after HTTP (response phase)
-      val pipeline = ProcessorPipeline.fromSeq(Seq(cache, http, cache), "TestPipeline")
+      val pipeline = ProcessorPipeline.fromSeq(Seq(cache, http), "TestPipeline")
 
         // Cache key ignores id (method+params only), so make params unique per item
         val req = allIds.map(id => mkReq(id, params = s"[${id}]")).mkString("[", ",", "]")
@@ -343,124 +343,124 @@ class CacheRpc3BatchSpec extends AnyWordSpec with Matchers with ScalaFutures {
    * Real captured JSON-RPC responses under `test/RSP*.json`, paired with matching requests.
    * Bodies are compared after `parseJson.compactPrint` so formatting differences do not matter.
    */
-  "CacheRpc3Processor (test/ RSP*.json fixtures)" should {
+  "Rpc3Processor (test/ RSP*.json fixtures)" should {
 
     "cache single eth_getBlockByNumber(latest) using REQ_latest.json + RSP_1.json" in {
-      val cache = CacheRpc3Processor.expire(ttl = 30000L)
+      val cache = Rpc3Processor.expire(ttl = 30000L)
       val rsp = loadTestFixture("RSP_1.json")
       val req = loadTestFixture("REQ_latest.json")
       var httpCalls = 0
 
-      val http = new HttpClientProcessor(compression = "") {
+      val http = new HttpProcessor(compression = "") {
         override def processRequest(session: Session): Future[Session] = {
           httpCalls += 1
-          Future.successful(session.withResponse(rsp, ProxyData.REMOTE))
+          Future.successful(session.withResponse(rsp, ResponseSource.REMOTE))
         }
       }
 
-      val pipeline = ProcessorPipeline.fromSeq(Seq(cache, http, cache), "TestPipeline")
+      val pipeline = ProcessorPipeline.fromSeq(Seq(cache, http), "TestPipeline")
 
       val r1 = pipeline.process(Session(requestBody = req)).futureValue
-      r1.responseSource shouldBe ProxyData.REMOTE
+      r1.responseSource shouldBe ResponseSource.REMOTE
       jsonCanon(r1.responseBody.get) shouldBe jsonCanon(rsp)
       httpCalls shouldBe 1
 
       val r2 = pipeline.process(Session(requestBody = req)).futureValue
-      r2.responseSource shouldBe ProxyData.CACHE
+      r2.responseSource shouldBe ResponseSource.CACHE
       jsonCanon(r2.responseBody.get) shouldBe jsonCanon(rsp)
       httpCalls shouldBe 1
     }
 
     "cache eth_blockNumber using REQ_eth_blockNumber_latest.json + RSP_eth_blockNumber.json" in {
-      val cache = CacheRpc3Processor.expire(ttl = 30000L)
+      val cache = Rpc3Processor.expire(ttl = 30000L)
       val rsp = loadTestFixture("RSP_eth_blockNumber.json")
       val req = loadTestFixture("REQ_eth_blockNumber_latest.json")
       var httpCalls = 0
 
-      val http = new HttpClientProcessor(compression = "") {
+      val http = new HttpProcessor(compression = "") {
         override def processRequest(session: Session): Future[Session] = {
           httpCalls += 1
-          Future.successful(session.withResponse(rsp, ProxyData.REMOTE))
+          Future.successful(session.withResponse(rsp, ResponseSource.REMOTE))
         }
       }
 
-      val pipeline = ProcessorPipeline.fromSeq(Seq(cache, http, cache), "TestPipeline")
+      val pipeline = ProcessorPipeline.fromSeq(Seq(cache, http), "TestPipeline")
 
       val r1 = pipeline.process(Session(requestBody = req)).futureValue
-      r1.responseSource shouldBe ProxyData.REMOTE
+      r1.responseSource shouldBe ResponseSource.REMOTE
       jsonCanon(r1.responseBody.get) shouldBe jsonCanon(rsp)
       httpCalls shouldBe 1
 
       val r2 = pipeline.process(Session(requestBody = req)).futureValue
-      r2.responseSource shouldBe ProxyData.CACHE
+      r2.responseSource shouldBe ResponseSource.CACHE
       httpCalls shouldBe 1
     }
 
     "cache batch item using RSP_Batch_1.json (request id aligned with fixture)" in {
-      val cache = CacheRpc3Processor.expire(ttl = 30000L)
+      val cache = Rpc3Processor.expire(ttl = 30000L)
       val rsp = loadTestFixture("RSP_Batch_1.json")
       val req =
         """[{"jsonrpc":"2.0","method":"eth_getBlockByNumber","params":["latest", false],"id":1}]"""
       var httpCalls = 0
 
-      val http = new HttpClientProcessor(compression = "") {
+      val http = new HttpProcessor(compression = "") {
         override def processRequest(session: Session): Future[Session] = {
           httpCalls += 1
-          Future.successful(session.withResponse(rsp, ProxyData.REMOTE))
+          Future.successful(session.withResponse(rsp, ResponseSource.REMOTE))
         }
       }
 
-      val pipeline = ProcessorPipeline.fromSeq(Seq(cache, http, cache), "TestPipeline")
+      val pipeline = ProcessorPipeline.fromSeq(Seq(cache, http), "TestPipeline")
 
       val r1 = pipeline.process(Session(requestBody = req)).futureValue
-      r1.responseSource shouldBe ProxyData.REMOTE
+      r1.responseSource shouldBe ResponseSource.REMOTE
       jsonCanon(r1.responseBody.get) shouldBe jsonCanon(rsp)
       httpCalls shouldBe 1
 
       val r2 = pipeline.process(Session(requestBody = req)).futureValue
-      r2.responseSource shouldBe ProxyData.CACHE
+      r2.responseSource shouldBe ResponseSource.CACHE
       httpCalls shouldBe 1
     }
 
     "cache batch item using RSP_Batch_2.json (id 2)" in {
-      val cache = CacheRpc3Processor.expire(ttl = 30000L)
+      val cache = Rpc3Processor.expire(ttl = 30000L)
       val rsp = loadTestFixture("RSP_Batch_2.json")
       val req =
         """[{"jsonrpc":"2.0","method":"eth_getBlockByNumber","params":["latest", false],"id":2}]"""
       var httpCalls = 0
 
-      val http = new HttpClientProcessor(compression = "") {
+      val http = new HttpProcessor(compression = "") {
         override def processRequest(session: Session): Future[Session] = {
           httpCalls += 1
-          Future.successful(session.withResponse(rsp, ProxyData.REMOTE))
+          Future.successful(session.withResponse(rsp, ResponseSource.REMOTE))
         }
       }
 
-      val pipeline = ProcessorPipeline.fromSeq(Seq(cache, http, cache), "TestPipeline")
+      val pipeline = ProcessorPipeline.fromSeq(Seq(cache, http), "TestPipeline")
 
       val r1 = pipeline.process(Session(requestBody = req)).futureValue
       jsonCanon(r1.responseBody.get) shouldBe jsonCanon(rsp)
       httpCalls shouldBe 1
 
       val r2 = pipeline.process(Session(requestBody = req)).futureValue
-      r2.responseSource shouldBe ProxyData.CACHE
+      r2.responseSource shouldBe ResponseSource.CACHE
       httpCalls shouldBe 1
     }
 
     "not cache single error response (RSP_error_32000.json); second request hits HTTP again" in {
-      val cache = CacheRpc3Processor.expire(ttl = 30000L)
+      val cache = Rpc3Processor.expire(ttl = 30000L)
       val rsp = loadTestFixture("RSP_error_32000.json")
       val req = """{"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":0}"""
       var httpCalls = 0
 
-      val http = new HttpClientProcessor(compression = "") {
+      val http = new HttpProcessor(compression = "") {
         override def processRequest(session: Session): Future[Session] = {
           httpCalls += 1
-          Future.successful(session.withResponse(rsp, ProxyData.REMOTE))
+          Future.successful(session.withResponse(rsp, ResponseSource.REMOTE))
         }
       }
 
-      val pipeline = ProcessorPipeline.fromSeq(Seq(cache, http, cache), "TestPipeline")
+      val pipeline = ProcessorPipeline.fromSeq(Seq(cache, http), "TestPipeline")
 
       val r1 = pipeline.process(Session(requestBody = req)).futureValue
       r1.isRejected shouldBe false
@@ -473,19 +473,19 @@ class CacheRpc3BatchSpec extends AnyWordSpec with Matchers with ScalaFutures {
     }
 
     "not cache batch error response (RSP_Batch_error_32000.json); second request hits HTTP again" in {
-      val cache = CacheRpc3Processor.expire(ttl = 30000L)
+      val cache = Rpc3Processor.expire(ttl = 30000L)
       val rsp = loadTestFixture("RSP_Batch_error_32000.json")
       val req = """[{"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":0}]"""
       var httpCalls = 0
 
-      val http = new HttpClientProcessor(compression = "") {
+      val http = new HttpProcessor(compression = "") {
         override def processRequest(session: Session): Future[Session] = {
           httpCalls += 1
-          Future.successful(session.withResponse(rsp, ProxyData.REMOTE))
+          Future.successful(session.withResponse(rsp, ResponseSource.REMOTE))
         }
       }
 
-      val pipeline = ProcessorPipeline.fromSeq(Seq(cache, http, cache), "TestPipeline")
+      val pipeline = ProcessorPipeline.fromSeq(Seq(cache, http), "TestPipeline")
 
       pipeline.process(Session(requestBody = req)).futureValue
       httpCalls shouldBe 1

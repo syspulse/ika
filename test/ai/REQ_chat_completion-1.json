@@ -1,0 +1,18 @@
+{
+    "model": "openai/gpt-4o-mini",
+    "messages": [
+      {
+        "role": "system",
+        "content": "You are a helpful assistant."
+      },
+      {
+        "role": "user",
+        "content": "Hello!"
+      }
+    ],
+    "metadata": {
+        "request_id": "1234567890",
+        "aid": "8c9e4c7c-0c5c-4a3e-9bb5-3f0f7b6b0f3a",
+        "pid": "1134"
+    }
+}

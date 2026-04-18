@@ -6,10 +6,15 @@ import scala.jdk.CollectionConverters._
 import java.util.concurrent.ConcurrentHashMap
 import com.typesafe.scalalogging.Logger
 
+import com.typesafe.config.{Config => TypesafeConfig}
+import akka.actor.ActorSystem
+
 import io.syspulse.ika.processor.{Processor, Session}
-import io.syspulse.ika.store.ProxyData
+import io.syspulse.ika.processor.uri.CacheURI
+import io.syspulse.ika.processor.ResponseSource
 import io.syspulse.ika.telemetry.Telemetry
 import io.syspulse.skel.cron.CronFreq
+import io.syspulse.ika.processor.util.ProcessorConfigurable
 
 /**
  * CacheProcessor provides generic request/response caching with TTL and garbage collection.
@@ -83,14 +88,14 @@ class CacheProcessor(
     mode match {
       case "none" =>
         // No caching - pass through
-        Future.successful(session)
+        next(session)
 
       case "expire" =>
         processExpireMode(session)
 
       case _ =>
         log.warn(s"Unknown cache mode: $mode, using passthrough")
-        Future.successful(session)
+        next(session)
     }
   }
 
@@ -98,15 +103,19 @@ class CacheProcessor(
    * Process with expire mode - check cache on request, store on response
    */
   protected def processExpireMode(session: Session): Future[Session] = {
-    // Check if response already set (from cache or upstream)
-    session.responseBody match {
-      case Some(response) =>
-        // Response phase - cache the response if needed
-        handleResponsePhase(session, response)
-
-      case None =>
-        // Request phase - check cache
-        handleRequestPhase(session)
+    // Request phase - check cache first
+    handleRequestPhase(session).flatMap { s =>
+      // If cache hit produced a response or early-return, stop here
+      if (s.responseBody.isDefined || s.shouldReturn || s.isRejected) Future.successful(s)
+      else {
+        // Cache miss: call downstream, then cache the response (if any)
+        next(s).flatMap { down =>
+          down.responseBody match {
+            case Some(resp) => handleResponsePhase(down, resp)
+            case None       => Future.successful(down)
+          }
+        }
+      }
     }
   }
 
@@ -146,7 +155,7 @@ class CacheProcessor(
           log.info(s"Cache HIT: $cacheKey")
 
           Future.successful(session
-            .withResponse(entry.response, ProxyData.CACHE)
+            .withResponse(entry.response, ResponseSource.CACHE)
             .putData("cacheHit", true)
             .putData("fromCache", true)
             .putData("cacheKey", cacheKey)
@@ -263,10 +272,10 @@ class CacheProcessor(
   /**
    * Override toString for better logging
    */
-  override def toString: String = s"CacheProcessor(mode=$mode, ttl=${ttl}ms, gcFreq=${gcFreq}ms)"
+  override def toString: String = s"${name}($mode,${ttl},${gcFreq})"
 }
 
-object CacheProcessor {
+object CacheProcessor extends ProcessorConfigurable {
   /**
    * Create a CacheProcessor with no caching (passthrough)
    */
@@ -288,5 +297,41 @@ object CacheProcessor {
       gcFreq = gcFreq,
       skipCaching = skipCaching
     )
+  }
+
+  /**
+   * Build from [[CacheURI]] (`none` or `expire` only; for `rpc3` use [[io.syspulse.ika.processor.rpc3.CacheRpc3Processor.fromCacheUri]]).
+   */
+  def fromUri(c: CacheURI, skipCaching: Set[String] = Set.empty)(implicit ec: ExecutionContext): CacheProcessor = {
+    c.kind match {
+      case "none" =>
+        none()
+      case "expire" =>
+        expire(ttl = c.ttl, gcFreq = c.gcFreq, skipCaching = skipCaching)
+      case _ =>
+        expire()
+    }
+  }
+
+  override val tpe: String = "cache"
+
+  private def cacheProcessorFromUri(c: CacheURI)(implicit ec: ExecutionContext): Processor =
+    CacheProcessor.fromUri(c)
+
+  override def fromConfig(id: String, cfg: TypesafeConfig)(implicit ec: ExecutionContext, actorSystem: ActorSystem): Seq[Processor] = {
+    val rawBase = if (cfg.hasPath("strategy")) cfg.getString("strategy") else "expire://"
+    val base = if (rawBase.contains("://")) rawBase else s"${rawBase}://"
+    val ttl = if (cfg.hasPath("ttl")) Some(cfg.getLong("ttl")) else None
+    val gc = if (cfg.hasPath("gc")) Some(cfg.getLong("gc"))
+    else if (cfg.hasPath("gcFreq")) Some(cfg.getLong("gcFreq"))
+    else None
+
+    val q = Seq(
+      ttl.map(v => s"ttl=$v"),
+      gc.map(v => s"gc=$v")
+    ).flatten
+
+    val uri = if (q.nonEmpty) s"${base}?${q.mkString("&")}" else base
+    Seq(cacheProcessorFromUri(CacheURI(uri)))
   }
 }

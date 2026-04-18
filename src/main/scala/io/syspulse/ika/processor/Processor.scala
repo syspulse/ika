@@ -1,6 +1,7 @@
 package io.syspulse.ika.processor
 
 import scala.concurrent.Future
+import scala.concurrent.ExecutionContext
 
 /**
  * Base trait for all processors in the pipeline.
@@ -16,6 +17,25 @@ trait Processor {
    * - Use immutable Session updates
    */
   def process(session: Session): Future[Session]
+
+  /**
+   * Call the next processor in the current session pipeline.
+   * The session must have been initialized with `withPipeline(...)`.
+   */
+  final def next(session: Session)(implicit ec: ExecutionContext): Future[Session] = {
+    session.nextProcessor match {
+      case Some(p) =>
+        p.process(session).recover { case ex: Exception =>
+          session.reject(
+            code = -32603,
+            message = s"Internal processor error: ${ex.getMessage}",
+            processorName = p.name,
+            details = Some(ex.getClass.getSimpleName)
+          )
+        }
+      case None    => Future.successful(session)
+    }
+  }
 
   /**
    * Unique name for this processor (used in logging and rejection messages)
@@ -37,8 +57,14 @@ trait RequestProcessor extends Processor {
   final def process(session: Session): Future[Session] = {
     if (session.isRejected) {
       Future.successful(session)
+    } else if (session.shouldReturn) {
+      Future.successful(session)
     } else {
-      processRequest(session)
+      implicit val ec: ExecutionContext = scala.concurrent.ExecutionContext.Implicits.global
+      processRequest(session).flatMap { s =>
+        if (s.isRejected || s.shouldReturn) Future.successful(s)
+        else next(s)
+      }
     }
   }
 }
@@ -58,8 +84,14 @@ trait ResponseProcessor extends Processor {
   final def process(session: Session): Future[Session] = {
     if (session.isRejected) {
       Future.successful(session)
+    } else if (session.shouldReturn) {
+      Future.successful(session)
     } else {
-      processResponse(session)
+      implicit val ec: ExecutionContext = scala.concurrent.ExecutionContext.Implicits.global
+      processResponse(session).flatMap { s =>
+        if (s.isRejected || s.shouldReturn) Future.successful(s)
+        else next(s)
+      }
     }
   }
 }
@@ -84,13 +116,14 @@ trait BidirectionalProcessor extends Processor {
    * Override process() if you need different behavior.
    */
   def process(session: Session): Future[Session] = {
-    if (session.isRejected) {
+    if (session.isRejected || session.shouldReturn) {
       Future.successful(session)
     } else {
       import scala.concurrent.ExecutionContext.Implicits.global
       for {
         reqSession <- processRequest(session)
-        respSession <- if (reqSession.isRejected) Future.successful(reqSession) else processResponse(reqSession)
+        downSession <- if (reqSession.isRejected || reqSession.shouldReturn) Future.successful(reqSession) else next(reqSession)
+        respSession <- if (downSession.isRejected || downSession.shouldReturn) Future.successful(downSession) else processResponse(downSession)
       } yield respSession
     }
   }

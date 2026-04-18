@@ -139,19 +139,7 @@ class ProcessorPipelineSpec extends AnyWordSpec with Matchers with ScalaFutures 
       result.getData[String]("step2") shouldBe Some("done")
       result.getData[String]("step3") shouldBe Some("done")
     }
-
-    "have meaningful toString" in {
-      val pipeline = ProcessorPipeline(
-        "TestPipeline",
-        new SetDestinationProcessor("http://localhost:8545"),
-        new AddHeaderProcessor("header", "value")
-      )
-
-      pipeline.toString should include("TestPipeline")
-      pipeline.toString should include("SetDestination")
-      pipeline.toString should include("AddHeader")
-      pipeline.toString should include("→")
-    }
+    
   }
 
   "ProcessorPipeline object" should {

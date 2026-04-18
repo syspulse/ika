@@ -1,21 +1,15 @@
 package io.syspulse.ika.store
 
-import scala.util.Try
-import scala.util.{Success,Failure}
-import scala.collection.immutable
-
-import akka.actor.typed.ActorRef
-import akka.actor.typed.Behavior
-import akka.actor.typed.scaladsl.Behaviors
 import com.typesafe.scalalogging.Logger
 
-import io.jvm.uuid._
 import scala.concurrent.Future
 
 import spray.json._
+import akka.http.scaladsl.model.{HttpHeader, HttpMethod}
+
+import io.syspulse.ika.processor.{ResponseSource, Session}
 import io.syspulse.ika.processor.rpc3.ProxyRpcReq
 import io.syspulse.ika.processor.rpc3.ProxyJson
-import akka.http.scaladsl.model.HttpHeader
 
 class ProxyStoreNone extends ProxyStore {
   val log = Logger(s"${this}")
@@ -24,7 +18,7 @@ class ProxyStoreNone extends ProxyStore {
 
   import ProxyJson._
   
-  def proxy(req:String,headers:Seq[HttpHeader]) = {
+  def proxy(method: HttpMethod, uriSuffix: String, req: String, headers: Seq[HttpHeader]): Future[Session] = {
     log.info(s"req='${req}', headers=${headers}")
 
     val request = if(req.trim.startsWith("{")) {
@@ -32,11 +26,12 @@ class ProxyStoreNone extends ProxyStore {
     } else
       ProxyRpcReq(jsonrpc = "",method = "",params = List.empty,id = 100)
 
-    Future {
-      ProxyData(
-        body = s"""{"jsonrpc": "2.0", "error": {"code": -32601, "message": "Not implemented"}, "id": ${request.id}}""",
-        src = ProxyData.LOCAL
-      )      
-    }
+    Future.successful(
+      Session(requestBody = req, requestHeaders = headers)
+        .withResponse(
+          s"""{"jsonrpc": "2.0", "error": {"code": -32601, "message": "Not implemented"}, "id": ${request.id}}""",
+          ResponseSource.LOCAL
+        )
+    )
   }
 }

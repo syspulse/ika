@@ -18,26 +18,26 @@ import akka.stream.Materializer
 
 import io.syspulse.ika.processor.{ProcessorPipeline}
 import io.syspulse.ika.processor.util.ProcessorPipelineBuilder
-import io.syspulse.ika.processor.util.ProcessorConfig
+import io.syspulse.ika.processor.util.PipelineProfile
 import io.syspulse.ika.processor.impl.{
-  HttpClientProcessor,
-  LoadBalancerProcessor,
+  HttpProcessor,
+  PoolProcessor,
   RejectionProcessor,
   RetryProcessor,
   TimeoutProcessor
 }
-import io.syspulse.ika.processor.rpc3.CacheRpc3Processor
+import io.syspulse.ika.processor.rpc3.Rpc3Processor
 import io.syspulse.ika.store.{ProxyStore, ProxyStorePipeline}
 
 /**
  * End-to-end tests: mock JSON-RPC backend (HTTP) → proxy pipeline ([[ProxyStorePipeline]]) →
  * proxy HTTP server → HTTP client ([[Http().singleRequest]]).
  *
- * Note: The built-in Web3 pipeline runs [[io.syspulse.ika.processor.impl.CacheRpc3Processor]]
- * before [[io.syspulse.ika.processor.impl.HttpClientProcessor]] in a single forward pass, so the
+ * Note: The built-in Web3 pipeline runs [[io.syspulse.ika.processor.rpc3.Rpc3Processor]]
+ * before [[io.syspulse.ika.processor.impl.HttpProcessor]] in a single forward pass, so the
  * cache lookup runs on the request but the response is never fed back into the same processor in
  * that pass (response-phase caching would require a second pass or a store processor after HTTP).
- * Real cache **hits** over HTTP are tested below by wiring the same [[CacheRpc3Processor]]
+ * Real cache **hits** over HTTP are tested below by wiring the same [[Rpc3Processor]]
  * instance twice (lookup before HTTP, store after HTTP), which the default [[PipelineBuilder]]
  * Web3 chain does not do in one pass.
  */
@@ -70,11 +70,11 @@ class ProxyPipelineHttpIntegrationSpec
     post {
       pathEndOrSingleSlash {
         entity(as[String]) { body =>
-          onSuccess(store.proxy(body, Nil)) { pd =>
+          onSuccess(store.proxy(HttpMethods.POST, "/", body, Nil)) { sess =>
             complete(
               HttpResponse(
-                status = StatusCodes.OK,
-                entity = HttpEntity(ContentTypes.`application/json`, pd.body)
+                status = sess.responseStatus,
+                entity = HttpEntity(ContentTypes.`application/json`, sess.responseBody.getOrElse(""))
               )
             )
           }
@@ -84,17 +84,17 @@ class ProxyPipelineHttpIntegrationSpec
 
   private def pipelineStore(
       destinations: Seq[String],
-      processorConfig: ProcessorConfig,
+      processorConfig: PipelineProfile,
       cacheUri: String,
-      poolStrategy: String = "sticky"
+      poolUri: String = "sticky://"
   ): ProxyStore = {
-    val builder = ProcessorPipelineBuilder(
+    val pipeline = ProcessorPipelineBuilder.buildWeb3Pipeline(
       destinations = destinations,
-      processorConfig = processorConfig,
-      poolStrategy = poolStrategy,
+      profile = processorConfig,
+      poolUri = poolUri,
       cacheUri = cacheUri
     )
-    new ProxyStorePipeline(builder.build("web3"), "web3")
+    new ProxyStorePipeline(pipeline, "web3")
   }
 
   private def bind(route: akka.http.scaladsl.server.Route): Http.ServerBinding =
@@ -133,7 +133,7 @@ class ProxyPipelineHttpIntegrationSpec
         try {
           val store = pipelineStore(
             Seq(backendUrl(backendBinding)),
-            ProcessorConfig.default.copy(timeout = 8000L, retryDelay = 50L),
+            PipelineProfile.default.copy(timeout = 8000L, retryDelay = 50L),
             cacheUri = "rpc3://"
           )
           val px = bind(proxyRoute(store))
@@ -161,14 +161,14 @@ class ProxyPipelineHttpIntegrationSpec
         val backendBinding = bind(backendRoute)
         try {
           val dest = backendUrl(backendBinding)
-          val cache = CacheRpc3Processor.expire()
+          val cache = Rpc3Processor.expire()
           val timeout = new TimeoutProcessor(8000L, Some(50L))
-          val lb = LoadBalancerProcessor.sticky(Seq(dest))
-          val http = HttpClientProcessor("")
-          val retry = new RetryProcessor(http, maxRetries = 3, delayMs = 50L)
+          val lb = PoolProcessor.sticky(Seq(dest))
+          val http = new HttpProcessor()
+          val retry = new RetryProcessor(maxRetries = 3, delayMs = 50L)
           val rej = RejectionProcessor.jsonRpc(httpStatusCode = 200)
           val pipeline = ProcessorPipeline.fromSeq(
-            Seq(cache, timeout, lb, retry, cache, rej),
+            Seq(cache, timeout, lb, retry, http, rej),
             "CacheRpc3"
           )
           val store = new ProxyStorePipeline(pipeline, "cache-rpc3")
@@ -198,7 +198,7 @@ class ProxyPipelineHttpIntegrationSpec
         try {
           val store = pipelineStore(
             Seq(backendUrl(backendBinding)),
-            ProcessorConfig.default.copy(timeout = 8000L, retryDelay = 50L),
+            PipelineProfile.default.copy(timeout = 8000L, retryDelay = 50L),
             cacheUri = "none://"
           )
           val px = bind(proxyRoute(store))
@@ -230,7 +230,7 @@ class ProxyPipelineHttpIntegrationSpec
         try {
           val store = pipelineStore(
             Seq(backendUrl(backendBinding)),
-            ProcessorConfig.default.copy(
+            PipelineProfile.default.copy(
               timeout = 8000L,
               retry = 4,
               retryDelay = 30L
@@ -267,7 +267,7 @@ class ProxyPipelineHttpIntegrationSpec
         try {
           val store = pipelineStore(
             Seq(backendUrl(backendBinding)),
-            ProcessorConfig.default.copy(
+            PipelineProfile.default.copy(
               timeout = 80L,
               retry = 0,
               retryDelay = 10L
@@ -290,7 +290,7 @@ class ProxyPipelineHttpIntegrationSpec
       }
     }
 
-    "using LoadBalancerProcessor (round-robin)" should {
+    "using PoolProcessor (round-robin)" should {
       "spread requests across two backends" in {
         val b1hits = new AtomicInteger(0)
         val b2hits = new AtomicInteger(0)
@@ -317,9 +317,9 @@ class ProxyPipelineHttpIntegrationSpec
           val d2 = backendUrl(be2)
           val store = pipelineStore(
             Seq(d1, d2),
-            ProcessorConfig.default.copy(timeout = 8000L, retryDelay = 50L),
+            PipelineProfile.default.copy(timeout = 8000L, retryDelay = 50L),
             cacheUri = "none://",
-            poolStrategy = "lb"
+            poolUri = "lb://"
           )
           val px = bind(proxyRoute(store))
           try {

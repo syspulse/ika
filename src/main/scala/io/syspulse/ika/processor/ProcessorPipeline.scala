@@ -35,72 +35,42 @@ class ProcessorPipeline(
   def process(session: Session): Future[Session] = {
     log.debug(s"Starting pipeline with ${processors.size} processors")
 
-    // Inject telemetry into session for processors to use
     val sessionWithTelemetry = telemetry match {
       case Some(t) => session.putData("telemetry", t)
-      case None => session
+      case None    => session
     }
 
-    // Record pipeline start
     telemetry.foreach(_.incRequests())
 
-    processors.foldLeft(Future.successful(sessionWithTelemetry)) { (futureSession, processor) =>
-      futureSession.flatMap { currentSession =>
-        // Short-circuit based on session state
-        if (currentSession.isRejected) {
-          log.debug(s"Skipping processor '${processor.name}' - session rejected")
-          Future.successful(currentSession)
-        } else if (currentSession.shouldReturn) {
-          val reason = currentSession.getData[String]("returnReason").getOrElse("unknown")
-          log.debug(s"Skipping processor '${processor.name}' - session returning early (reason: $reason)")
-          Future.successful(currentSession)
-        } else {
-          log.debug(s"Executing processor: ${processor.name}")
+    val initialized = sessionWithTelemetry.withPipeline(processors)
 
-          processor.process(currentSession)
-            .map { resultSession =>
-              if (resultSession.isRejected) {
-                log.warn(s"Processor '${processor.name}' rejected session: ${resultSession.rejection}")
-              } else if (resultSession.shouldReturn) {
-                val reason = resultSession.getData[String]("returnReason").getOrElse("unknown")
-                log.info(s"Processor '${processor.name}' returned early (reason: $reason)")
-              } else {
-                log.debug(s"Processor '${processor.name}' completed successfully")
-              }
-              resultSession
-            }
-            .recoverWith { case ex: Exception =>
-              log.error(s"Processor '${processor.name}' failed with exception: ${ex.getMessage}", ex)
-              Future.successful(
-                currentSession.reject(
-                  code = -32603,
-                  message = s"Internal processor error: ${ex.getMessage}",
-                  processorName = processor.name,
-                  details = Some(ex.getClass.getSimpleName)
-                )
-              )
-            }
-        }
+    val start: Future[Session] =
+      initialized.nextProcessor match {
+        case Some(p) =>
+          p.process(initialized).recover { case ex: Exception =>
+            initialized.reject(
+              code = -32603,
+              message = s"Internal processor error: ${ex.getMessage}",
+              processorName = p.name,
+              details = Some(ex.getClass.getSimpleName)
+            )
+          }
+        case None =>
+          Future.successful(initialized)
       }
-    }.map { finalSession =>
-      log.debug(s"Pipeline completed. Rejected: ${finalSession.isRejected}, Duration: ${finalSession.durationMs}ms")
 
-      // Record metrics
+    start.map { finalSession =>
+      log.debug(s"Pipeline completed. Rejected: ${finalSession.isRejected}, Duration: ${finalSession.durationMs}ms")
       telemetry.foreach { t =>
-        if (finalSession.isRejected) {
-          t.incRejections()
-        } else {
-          t.incResponses()
-        }
+        if (finalSession.isRejected) t.incRejections() else t.incResponses()
         t.recordRequestTime(finalSession.durationMs)
       }
-
       finalSession.complete()
     }
   }
 
   override def toString: String = {
-    s"$name(${processors.map(_.name).mkString(" → ")})"
+    s"$name(${processors.map(p => p.toString).mkString(" -> ")})"
   }
 }
 

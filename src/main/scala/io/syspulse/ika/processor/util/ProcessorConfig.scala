@@ -1,7 +1,7 @@
 package io.syspulse.ika.processor.util
 
 /**
- * ProcessorConfig contains processor-specific configuration.
+ * PipelineProfile contains a common processor set configuration.
  *
  * These settings are used by processors in the pipeline and should not be
  * in the main Config class (which is generic for the proxy server).
@@ -12,7 +12,7 @@ package io.syspulse.ika.processor.util
  * - Processor URI parameters
  * - Defaults
  */
-case class ProcessorConfig(
+case class PipelineProfile(
   // HTTP Client
   timeout: Long = 10000L,           // Request timeout in milliseconds
   compress: String = "",             // Compression: "gzip,deflate" or ""
@@ -33,16 +33,16 @@ case class ProcessorConfig(
   headers: Seq[String] = Seq()       // Additional headers to send
 )
 
-object ProcessorConfig {
+object PipelineProfile {
   /**
    * Default configuration
    */
-  def default: ProcessorConfig = ProcessorConfig()
+  def default: PipelineProfile = PipelineProfile()
 
   /**
    * Configuration for Web3/RPC use case
    */
-  def web3: ProcessorConfig = ProcessorConfig(
+  def web3: PipelineProfile = PipelineProfile(
     timeout = 150L,
     retry = 3,
     retryDelay = 1000L,
@@ -55,7 +55,7 @@ object ProcessorConfig {
   /**
    * Configuration for AI API use case
    */
-  def ai: ProcessorConfig = ProcessorConfig(
+  def ai: PipelineProfile = PipelineProfile(
     timeout = 30000L,    // AI APIs can be slower
     retry = 2,
     retryDelay = 2000L,
@@ -68,7 +68,7 @@ object ProcessorConfig {
   /**
    * Fast configuration for low-latency use cases
    */
-  def fast: ProcessorConfig = ProcessorConfig(
+  def fast: PipelineProfile = PipelineProfile(
     timeout = 1000L,
     retry = 1,
     retryDelay = 100L,

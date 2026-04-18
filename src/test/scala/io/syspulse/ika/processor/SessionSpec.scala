@@ -3,7 +3,7 @@ package io.syspulse.ika.processor
 import org.scalatest.matchers.should.Matchers
 import org.scalatest.wordspec.AnyWordSpec
 import akka.http.scaladsl.model.headers.RawHeader
-import io.syspulse.ika.store.ProxyData
+import io.syspulse.ika.processor.ResponseSource
 
 class SessionSpec extends AnyWordSpec with Matchers {
 
@@ -40,10 +40,10 @@ class SessionSpec extends AnyWordSpec with Matchers {
     "set response data" in {
       val session = Session(requestBody = "test")
       val headers = Seq(RawHeader("Content-Type", "application/json"))
-      val updated = session.withResponse("response body", ProxyData.REMOTE, headers)
+      val updated = session.withResponse("response body", ResponseSource.REMOTE, headers = headers)
 
       updated.responseBody shouldBe Some("response body")
-      updated.responseSource shouldBe ProxyData.REMOTE
+      updated.responseSource shouldBe ResponseSource.REMOTE
       updated.responseHeaders shouldBe headers
     }
 
@@ -96,8 +96,8 @@ class SessionSpec extends AnyWordSpec with Matchers {
     "deduplicate response headers in withResponse" in {
       val s = Session(requestBody = "x").withResponse(
         "{}",
-        ProxyData.REMOTE,
-        Seq(RawHeader("Vary", "*"), RawHeader("vary", "Origin"))
+        ResponseSource.REMOTE,
+        headers = Seq(RawHeader("Vary", "*"), RawHeader("vary", "Origin"))
       )
       s.responseHeaders should have length 1
       s.responseHeaders.head.value shouldBe "Origin"
@@ -121,10 +121,10 @@ class SessionSpec extends AnyWordSpec with Matchers {
       val session = Session(requestBody = "test")
       val updated = session
         .putData("cacheHit", true)
-        .withResponse("cached", ProxyData.CACHE)
+        .withResponse("cached", ResponseSource.CACHE)
 
       updated.getData[Boolean]("cacheHit") shouldBe Some(true)
-      updated.responseSource shouldBe ProxyData.CACHE
+      updated.responseSource shouldBe ResponseSource.CACHE
     }
 
     "store retry counter in processorData" in {
@@ -142,18 +142,6 @@ class SessionSpec extends AnyWordSpec with Matchers {
 
       completed.durationMs should be >= 10L
       completed.endTime shouldBe defined
-    }
-
-    "convert to ProxyData" in {
-      val session = Session(
-        requestBody = "test",
-        responseBody = Some("response"),
-        responseSource = ProxyData.CACHE
-      )
-
-      val proxyData = session.toProxyData
-      proxyData.body shouldBe "response"
-      proxyData.src shouldBe ProxyData.CACHE
     }
 
     "be immutable - updates create new instances" in {

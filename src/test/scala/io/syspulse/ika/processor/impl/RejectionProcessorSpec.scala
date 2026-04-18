@@ -6,7 +6,7 @@ import scala.concurrent.{Future, ExecutionContext, Await}
 import scala.concurrent.duration._
 
 import io.syspulse.ika.processor.{Session, Rejection}
-import io.syspulse.ika.store.ProxyData
+import io.syspulse.ika.processor.ResponseSource
 
 class RejectionProcessorSpec extends AnyWordSpec with Matchers {
 
@@ -87,12 +87,12 @@ class RejectionProcessorSpec extends AnyWordSpec with Matchers {
     "pass through when no rejection" in {
       val processor = RejectionProcessor.jsonRpc()
       val session = Session(requestBody = "test")
-        .withResponse("success", ProxyData.REMOTE)
+        .withResponse("success", ResponseSource.REMOTE)
 
       val result = Await.result(processor.process(session), 5.seconds)
 
       result.responseBody shouldBe Some("success")
-      result.responseSource shouldBe ProxyData.REMOTE
+      result.responseSource shouldBe ResponseSource.REMOTE
       result.getData[Int]("httpStatusCode") shouldBe None
     }
   }
