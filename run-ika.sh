@@ -1,5 +1,6 @@
 #!/bin/bash                                                                                                                                                                                            
 export CWD=`echo $(dirname $(readlink -f $0))`
+export APP_EXEC=${APP_EXEC:-bloop}
 
 t=$CWD
 APP=`basename "$t"`

@@ -2,33 +2,74 @@
 
 ## Run 
 
-### Run with cache processor and expiration 12 seconds to the Pool processor with 1 node
+### Run via Profile
 
+Profile is configured in [conf/application.conf](conf/application.conf) (or [conf/application-${SITE}.conf](conf/application-local.conf)):
+
+```
+pool_1 {
+  type="pool://"
+  strategy="lb"
+  destinations = [
+    "host1=http://localhost:8300",
+    "host2=http://localhost:8301"
+  ]
+}
+
+retry_2 {
+  type="retry://"
+  maxRetries=3
+  delay=1000
+}
+
+http_2 {
+  type="http://"
+  connectTimeout=1000
+  responseTimeout=3000
+}
+
+profiles {    
+  
+  proxy3 = {
+    processors = "pool_1, retry_2, http_2"
+  }
+  
+}
+```
+
+Running with profile:
+
+```
+./run-ika.sh --profile proxy
+```
+
+### Run via pipeline
+
+Run with cache processor and expiration 12 seconds to the Pool processor with 1 node
 ```
 ./run-ika.sh cache://120000 pool://1=http://geth:8545
 ```
 
-### Run with 4 Threads pool, gzip compression processor to the pool processor with 2 nodes
+Run with 4 Threads pool, gzip compression processor to the pool processor with 2 nodes
 
 ```
 ./run-ika.sh --threads=4 compress://gzip pool://http://geth-1:8545,http://geth-2:8545
 ```
 
-### Run with Round-robin load-balancing processor
-
+Run with Round-robin load-balancing processor
 ```
 ./run-ika.sh lb://tag1=http://geth-1:8545,tag2=http://geth-2:8545
 ```
 
 
-### Run with RPC3 aware processor (`rpc3://` special cache which knows how to parse batches and use cache and exceptions)
+Run with RPC3 aware processor (`rpc3://` special cache which knows how to parse batches and use cache and exceptions)
+```
+./run-ika.sh rpc3://evm,10000,block  pool://tag1=http://geth-1:8545,tag2=http://geth-2:8545
+```
+
+Run with AI processors:  `ai://` processor knows how to route to the model, `ai_tokens://` knows how to calculate tokens from response
 
 ```
 ./run-ika.sh rpc3://evm,10000,block  pool://tag1=http://geth-1:8545,tag2=http://geth-2:8545
 ```
 
-### Run with AI processors:  `ai://` processor knows how to route to the model, `ai_tokens://` knows how to calculate tokens from response
-
-```
-./run-ika.sh rpc3://evm,10000,block  pool://tag1=http://geth-1:8545,tag2=http://geth-2:8545
-```
