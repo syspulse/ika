@@ -83,7 +83,7 @@ class AIRouterProcessor(
   override def processRequest(session: Session): Future[Session] = {
     try {
       // Parse request body as JSON
-      val json = session.requestBody.parseJson.asJsObject
+      val json = session.requestBody.utf8String.parseJson.asJsObject
 
       // Extract model field
       json.fields.get("model") match {

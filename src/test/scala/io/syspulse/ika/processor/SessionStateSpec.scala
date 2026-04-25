@@ -8,6 +8,7 @@ import scala.concurrent.duration._
 import akka.actor.ActorSystem
 import io.syspulse.ika.processor.impl.CacheProcessor
 import io.syspulse.ika.processor.ResponseSource
+import akka.util.ByteString
 
 class SessionStateSpec extends AnyWordSpec with Matchers {
 
@@ -16,7 +17,7 @@ class SessionStateSpec extends AnyWordSpec with Matchers {
 
   "Session state management" should {
     "start with CONTINUE state by default" in {
-      val session = Session(requestBody = "test")
+      val session = Session(requestBody = ByteString("test"))
 
       session.state shouldBe SessionState.CONTINUE
       session.shouldContinue shouldBe true
@@ -25,7 +26,7 @@ class SessionStateSpec extends AnyWordSpec with Matchers {
     }
 
     "transition to REJECT state on rejection" in {
-      val session = Session(requestBody = "test")
+      val session = Session(requestBody = ByteString("test"))
         .reject(code = -32600, message = "Invalid request", processorName = "TestProcessor")
 
       session.state shouldBe SessionState.REJECT
@@ -35,7 +36,7 @@ class SessionStateSpec extends AnyWordSpec with Matchers {
     }
 
     "transition to RETURN state on early return" in {
-      val session = Session(requestBody = "test")
+      val session = Session(requestBody = ByteString("test"))
         .returnEarly("cache_hit")
 
       session.state shouldBe SessionState.RETURN
@@ -75,7 +76,7 @@ class SessionStateSpec extends AnyWordSpec with Matchers {
       }
 
       val pipeline = ProcessorPipeline.fromSeq(Seq(processor1, processor2, processor3), "TestPipeline")
-      val session = Session(requestBody = "test")
+      val session = Session(requestBody = ByteString("test"))
 
       val result = Await.result(pipeline.process(session), 5.seconds)
 
@@ -93,7 +94,7 @@ class SessionStateSpec extends AnyWordSpec with Matchers {
         def process(session: Session): Future[Session] = {
           Future.successful(
             session
-              .withResponseBody("cached response")
+              .withResponseBody(ByteString("cached response"))
               .returnEarly("cache_hit")
           )
         }
@@ -116,12 +117,12 @@ class SessionStateSpec extends AnyWordSpec with Matchers {
       }
 
       val pipeline = ProcessorPipeline.fromSeq(Seq(processor1, processor2, processor3), "TestPipeline")
-      val session = Session(requestBody = "test")
+      val session = Session(requestBody = ByteString("test"))
 
       val result = Await.result(pipeline.process(session), 5.seconds)
 
       result.shouldReturn shouldBe true
-      result.responseBody shouldBe Some("cached response")
+      result.responseBody.map(_.utf8String) shouldBe Some("cached response")
       processor2Called shouldBe false
       processor3Called shouldBe false
     }
@@ -156,7 +157,7 @@ class SessionStateSpec extends AnyWordSpec with Matchers {
       }
 
       val pipeline = ProcessorPipeline.fromSeq(Seq(processor1, processor2, processor3), "TestPipeline")
-      val session = Session(requestBody = "test")
+      val session = Session(requestBody = ByteString("test"))
 
       val result = Await.result(pipeline.process(session), 5.seconds)
 
@@ -179,28 +180,28 @@ class SessionStateSpec extends AnyWordSpec with Matchers {
         def name = "HttpClient"
         def process(session: Session): Future[Session] = {
           httpClientCalled = true
-          Future.successful(session.withResponseBody(response))
+          Future.successful(session.withResponseBody(ByteString(response)))
         }
       }
 
       val pipeline = ProcessorPipeline.fromSeq(Seq(cache, httpClient), "CachePipeline")
 
       // First request - cache miss, should call HTTP
-      val session1 = Session(requestBody = request)
+      val session1 = Session(requestBody = ByteString(request))
       val result1 = Await.result(pipeline.process(session1), 5.seconds)
 
       httpClientCalled shouldBe true
-      result1.responseBody shouldBe Some(response)
+      result1.responseBody.map(_.utf8String) shouldBe Some(response)
       result1.shouldContinue shouldBe true
 
       // Second request - cache hit, should NOT call HTTP
       httpClientCalled = false
-      val session2 = Session(requestBody = request)
+      val session2 = Session(requestBody = ByteString(request))
       val result2 = Await.result(pipeline.process(session2), 5.seconds)
 
       httpClientCalled shouldBe false  // HTTP should NOT be called
       result2.shouldReturn shouldBe true  // Should return early
-      result2.responseBody shouldBe Some(response)  // Should have cached response
+      result2.responseBody.map(_.utf8String) shouldBe Some(response)  // Should have cached response
       result2.responseSource shouldBe ResponseSource.CACHE
       result2.getData[String]("returnReason") shouldBe Some("cache_hit")
     }

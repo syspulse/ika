@@ -75,7 +75,7 @@ class ProxyRoutes(registry: ActorRef[Command])(implicit context: ActorContext[_]
   val metricDeleteCount: Counter = Counter.build().name("ika_delete_total").help("ika deletes").register(TelemetryRegistry.registry)
   val metricOptionsCount: Counter = Counter.build().name("ika_options_total").help("ika options").register(TelemetryRegistry.registry)
   
-  private def proxy(method: HttpMethod, uriSuffix: String, req: String, headers: Seq[HttpHeader]): Future[Try[io.syspulse.ika.processor.Session]] =
+  private def proxy(method: HttpMethod, uriSuffix: String, req: akka.util.ByteString, headers: Seq[HttpHeader]): Future[Try[io.syspulse.ika.processor.Session]] =
     registry.ask(ProxyReq(method, uriSuffix, req, headers, _))
 
   private def normalizeSuffixPath(p: String): String = {
@@ -86,7 +86,7 @@ class ProxyRoutes(registry: ActorRef[Command])(implicit context: ActorContext[_]
   }
 
   private def rpcRoute(uriSuffixPath: String) = extractRequest { request =>
-    val strictF = request.entity.toStrict(15.seconds).map(_.data.utf8String)
+    val strictF = request.entity.toStrict(15.seconds).map(_.data)
     onSuccess(strictF) { reqBody =>
       val method = request.method
       val headers = request.headers
@@ -104,7 +104,7 @@ class ProxyRoutes(registry: ActorRef[Command])(implicit context: ActorContext[_]
         }
         rsp match {
           case Success(sess) =>
-            val body = sess.responseBody.getOrElse("")
+            val body = sess.responseBody.getOrElse(akka.util.ByteString.empty)
             // Drop hop-by-hop headers that must not be forwarded by proxies
             val hopByHop = Set(
               "connection",
@@ -121,7 +121,7 @@ class ProxyRoutes(registry: ActorRef[Command])(implicit context: ActorContext[_]
               HttpResponse(
                 status = sess.responseStatus,
                 headers = filtered.toList,
-                entity = HttpEntity(sess.responseContentType, akka.util.ByteString.fromString(body))
+                entity = HttpEntity(sess.responseContentType, body)
               )
             )
           case Failure(e) =>

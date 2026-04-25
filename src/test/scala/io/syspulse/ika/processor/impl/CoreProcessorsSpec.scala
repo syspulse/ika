@@ -11,6 +11,7 @@ import akka.http.scaladsl.model.headers.RawHeader
 import io.syspulse.ika.processor.{Session, ProcessorPipeline, RequestProcessor}
 import io.syspulse.ika.processor.rpc3.Rpc3Processor
 import io.syspulse.ika.processor.ResponseSource
+import akka.util.ByteString
 
 class CoreProcessorsSpec extends AnyWordSpec with Matchers with ScalaFutures {
 
@@ -21,7 +22,7 @@ class CoreProcessorsSpec extends AnyWordSpec with Matchers with ScalaFutures {
   "ThrottleProcessor" should {
     "delay requests" in {
       val throttle = new ThrottleProcessor(50)
-      val session = Session(requestBody = "test")
+      val session = Session(requestBody = ByteString("test"))
 
       val start = System.currentTimeMillis()
       val result = Await.result(throttle.process(session), 5.seconds)
@@ -33,7 +34,7 @@ class CoreProcessorsSpec extends AnyWordSpec with Matchers with ScalaFutures {
 
     "skip throttling when delay is 0" in {
       val throttle = new ThrottleProcessor(0)
-      val session = Session(requestBody = "test")
+      val session = Session(requestBody = ByteString("test"))
 
       val start = System.currentTimeMillis()
       val result = Await.result(throttle.process(session), 5.seconds)
@@ -47,7 +48,7 @@ class CoreProcessorsSpec extends AnyWordSpec with Matchers with ScalaFutures {
   "TimeoutProcessor" should {
     "set timeout in processorData" in {
       val timeout = new TimeoutProcessor(5000)
-      val session = Session(requestBody = "test")
+      val session = Session(requestBody = ByteString("test"))
 
       val result = Await.result(timeout.process(session), 5.seconds)
 
@@ -57,7 +58,7 @@ class CoreProcessorsSpec extends AnyWordSpec with Matchers with ScalaFutures {
 
     "set timeout and retry delay in processorData" in {
       val timeout = TimeoutProcessor(5000, 2000)
-      val session = Session(requestBody = "test")
+      val session = Session(requestBody = ByteString("test"))
 
       val result = Await.result(timeout.process(session), 5.seconds)
 
@@ -75,7 +76,7 @@ class CoreProcessorsSpec extends AnyWordSpec with Matchers with ScalaFutures {
       )
 
       val session = Session(
-        requestBody = "test",
+        requestBody = ByteString("test"),
         requestHeaders = Seq(
           RawHeader("Host", "example.com"),
           RawHeader("Timeout-Access", "1"),
@@ -107,21 +108,21 @@ class CoreProcessorsSpec extends AnyWordSpec with Matchers with ScalaFutures {
         override val name: String = "Backend"
         override def processRequest(session: Session): Future[Session] = {
           backendCalls += 1
-          Future.successful(session.withResponse(response, ResponseSource.REMOTE))
+          Future.successful(session.withResponse(ByteString(response), ResponseSource.REMOTE))
         }
       }
 
       val pipeline = ProcessorPipeline.fromSeq(Seq(cacheProc, backend), "CacheTest")
 
       // First call - backend
-      val r1 = Await.result(pipeline.process(Session(requestBody = request)), 5.seconds)
+      val r1 = Await.result(pipeline.process(Session(requestBody = ByteString(request))), 5.seconds)
       r1.responseSource shouldBe ResponseSource.REMOTE
       backendCalls shouldBe 1
 
       // Second call - cache
-      val r2 = Await.result(pipeline.process(Session(requestBody = request)), 5.seconds)
+      val r2 = Await.result(pipeline.process(Session(requestBody = ByteString(request))), 5.seconds)
       r2.responseSource shouldBe ResponseSource.CACHE
-      r2.responseBody shouldBe Some(response)
+      r2.responseBody.map(_.utf8String) shouldBe Some(response)
       r2.getData[Boolean]("cacheHit") shouldBe Some(true)
       backendCalls shouldBe 1
     }
@@ -137,14 +138,14 @@ class CoreProcessorsSpec extends AnyWordSpec with Matchers with ScalaFutures {
         override val name: String = "Backend"
         override def processRequest(session: Session): Future[Session] = {
           backendCalls += 1
-          Future.successful(session.withResponse(errorResponse, ResponseSource.REMOTE))
+          Future.successful(session.withResponse(ByteString(errorResponse), ResponseSource.REMOTE))
         }
       }
 
       val pipeline = ProcessorPipeline.fromSeq(Seq(cacheProc, backend), "CacheErrorTest")
 
-      Await.result(pipeline.process(Session(requestBody = request)), 5.seconds)
-      Await.result(pipeline.process(Session(requestBody = request)), 5.seconds)
+      Await.result(pipeline.process(Session(requestBody = ByteString(request))), 5.seconds)
+      Await.result(pipeline.process(Session(requestBody = ByteString(request))), 5.seconds)
 
       // Error responses are not cached => backend called twice
       backendCalls shouldBe 2
@@ -161,16 +162,16 @@ class CoreProcessorsSpec extends AnyWordSpec with Matchers with ScalaFutures {
         override val name: String = "Backend"
         override def processRequest(session: Session): Future[Session] = {
           backendCalls += 1
-          Future.successful(session.withResponse(ok, ResponseSource.REMOTE))
+          Future.successful(session.withResponse(ByteString(ok), ResponseSource.REMOTE))
         }
       }
 
       val pipeline = ProcessorPipeline.fromSeq(Seq(cacheProc, backend), "CacheBatchTest")
 
-      val r1 = Await.result(pipeline.process(Session(requestBody = batchRequest)), 5.seconds)
+      val r1 = Await.result(pipeline.process(Session(requestBody = ByteString(batchRequest))), 5.seconds)
       r1.responseSource shouldBe ResponseSource.REMOTE
 
-      val r2 = Await.result(pipeline.process(Session(requestBody = batchRequest)), 5.seconds)
+      val r2 = Await.result(pipeline.process(Session(requestBody = ByteString(batchRequest))), 5.seconds)
       r2.responseSource shouldBe ResponseSource.CACHE
       backendCalls shouldBe 1
     }
@@ -181,7 +182,7 @@ class CoreProcessorsSpec extends AnyWordSpec with Matchers with ScalaFutures {
       val destinations = Seq("http://localhost:8545", "http://localhost:8546")
       val lb = PoolProcessor.sticky(destinations)
 
-      val session = Session(requestBody = "test")
+      val session = Session(requestBody = ByteString("test"))
       val result = Await.result(lb.process(session), 5.seconds)
 
       result.getData[String]("destination") should not be empty
@@ -193,7 +194,7 @@ class CoreProcessorsSpec extends AnyWordSpec with Matchers with ScalaFutures {
       val destinations = Seq("openai:https://api.openai.com/v1", "anthropic:https://api.anthropic.com/v1")
       val lb = PoolProcessor.sticky(destinations)
 
-      val session = Session(requestBody = "test").putData("pool", "openai")
+      val session = Session(requestBody = ByteString("test")).putData("pool", "openai")
       val result = Await.result(lb.process(session), 5.seconds)
 
       result.getData[String]("destination") shouldBe Some("https://api.openai.com/v1")
@@ -204,7 +205,7 @@ class CoreProcessorsSpec extends AnyWordSpec with Matchers with ScalaFutures {
       val destinations = Seq()
       val lb = PoolProcessor.sticky(destinations)
 
-      val session = Session(requestBody = "test").putData("pool", "nonexistent")
+      val session = Session(requestBody = ByteString("test")).putData("pool", "nonexistent")
       val result = Await.result(lb.process(session), 5.seconds)
 
       result.isRejected shouldBe true
@@ -216,15 +217,15 @@ class CoreProcessorsSpec extends AnyWordSpec with Matchers with ScalaFutures {
       val lb = PoolProcessor.sticky(destinations)
 
       // Session with response already set (from cache)
-      val session = Session(requestBody = "test")
-        .withResponse("cached", ResponseSource.CACHE)
+      val session = Session(requestBody = ByteString("test"))
+        .withResponse(ByteString("cached"), ResponseSource.CACHE)
         .putData("fromCache", true)
         .putData("cacheHit", true)
 
       val result = Await.result(lb.process(session), 5.seconds)
 
       result.getData[String]("destination") shouldBe None // Should skip
-      result.responseBody shouldBe Some("cached")
+      result.responseBody.map(_.utf8String) shouldBe Some("cached")
     }
 
     "fail over across destinations (wrap-around) until success (sticky)" in {
@@ -237,7 +238,7 @@ class CoreProcessorsSpec extends AnyWordSpec with Matchers with ScalaFutures {
         override def processRequest(session: Session): Future[Session] = {
           calls += 1
           session.getData[String]("destination") match {
-            case Some("C") => Future.successful(session.withResponse("ok", ResponseSource.REMOTE))
+            case Some("C") => Future.successful(session.withResponse(ByteString("ok"), ResponseSource.REMOTE))
             case Some(d)   => Future.successful(session.reject(-1, s"fail:$d", name))
             case None      => Future.successful(session.reject(-1, "no-destination", name))
           }
@@ -245,9 +246,9 @@ class CoreProcessorsSpec extends AnyWordSpec with Matchers with ScalaFutures {
       }
 
       val pipeline = ProcessorPipeline.fromSeq(Seq(pool, backend), "PoolFailoverSticky")
-      val r = Await.result(pipeline.process(Session(requestBody = "test")), 5.seconds)
+      val r = Await.result(pipeline.process(Session(requestBody = ByteString("test"))), 5.seconds)
       r.isRejected shouldBe false
-      r.responseBody shouldBe Some("ok")
+      r.responseBody.map(_.utf8String) shouldBe Some("ok")
       calls shouldBe 3 // A, B, C
     }
 
@@ -261,7 +262,7 @@ class CoreProcessorsSpec extends AnyWordSpec with Matchers with ScalaFutures {
         override def processRequest(session: Session): Future[Session] = {
           calls += 1
           session.getData[String]("destination") match {
-            case Some("B") => Future.successful(session.withResponse("ok", ResponseSource.REMOTE))
+            case Some("B") => Future.successful(session.withResponse(ByteString("ok"), ResponseSource.REMOTE))
             case Some(d)   => Future.successful(session.reject(-1, s"fail:$d", name))
             case None      => Future.successful(session.reject(-1, "no-destination", name))
           }
@@ -270,11 +271,11 @@ class CoreProcessorsSpec extends AnyWordSpec with Matchers with ScalaFutures {
 
       val pipeline = ProcessorPipeline.fromSeq(Seq(pool, backend), "PoolStickyMemory")
 
-      val r1 = Await.result(pipeline.process(Session(requestBody = "test-1")), 5.seconds)
+      val r1 = Await.result(pipeline.process(Session(requestBody = ByteString("test-1"))), 5.seconds)
       r1.isRejected shouldBe false
       calls shouldBe 2 // A then B
 
-      val r2 = Await.result(pipeline.process(Session(requestBody = "test-2")), 5.seconds)
+      val r2 = Await.result(pipeline.process(Session(requestBody = ByteString("test-2"))), 5.seconds)
       r2.isRejected shouldBe false
       calls shouldBe 3 // starts at B => 1 more call
     }
@@ -289,7 +290,7 @@ class CoreProcessorsSpec extends AnyWordSpec with Matchers with ScalaFutures {
         override def processRequest(session: Session): Future[Session] = {
           calls += 1
           session.getData[String]("destination") match {
-            case Some("B") => Future.successful(session.withResponse("ok", ResponseSource.REMOTE))
+            case Some("B") => Future.successful(session.withResponse(ByteString("ok"), ResponseSource.REMOTE))
             case Some(d)   => Future.successful(session.reject(-1, s"fail:$d", name))
             case None      => Future.successful(session.reject(-1, "no-destination", name))
           }
@@ -298,12 +299,12 @@ class CoreProcessorsSpec extends AnyWordSpec with Matchers with ScalaFutures {
 
       val pipeline = ProcessorPipeline.fromSeq(Seq(pool, backend), "PoolLbMemory")
 
-      val r1 = Await.result(pipeline.process(Session(requestBody = "test-1")), 5.seconds)
+      val r1 = Await.result(pipeline.process(Session(requestBody = ByteString("test-1"))), 5.seconds)
       r1.isRejected shouldBe false
       calls shouldBe 2 // A then B
 
       // After success at B, LB starts at C next time => C, A, B
-      val r2 = Await.result(pipeline.process(Session(requestBody = "test-2")), 5.seconds)
+      val r2 = Await.result(pipeline.process(Session(requestBody = ByteString("test-2"))), 5.seconds)
       r2.isRejected shouldBe false
       calls shouldBe 5 // +3 calls
     }
@@ -313,7 +314,7 @@ class CoreProcessorsSpec extends AnyWordSpec with Matchers with ScalaFutures {
     "reject when no destination set" in {
       val http = new HttpProcessor()
 
-      val session = Session(requestBody = "test")
+      val session = Session(requestBody = ByteString("test"))
       val result = Await.result(http.process(session), 5.seconds)
 
       result.isRejected shouldBe true
@@ -324,13 +325,13 @@ class CoreProcessorsSpec extends AnyWordSpec with Matchers with ScalaFutures {
     "skip HTTP request when response already set" in {
       val http = new HttpProcessor()
 
-      val session = Session(requestBody = "test")
-        .withResponse("already set", ResponseSource.CACHE)
+      val session = Session(requestBody = ByteString("test"))
+        .withResponse(ByteString("already set"), ResponseSource.CACHE)
         .putData("destination", "http://localhost:8545")
 
       val result = Await.result(http.process(session), 5.seconds)
 
-      result.responseBody shouldBe Some("already set")
+      result.responseBody.map(_.utf8String) shouldBe Some("already set")
       result.isRejected shouldBe false
     }
   }
@@ -345,7 +346,7 @@ class CoreProcessorsSpec extends AnyWordSpec with Matchers with ScalaFutures {
       val pipeline = ProcessorPipeline.fromSeq(Seq(cache, timeout, lb), "TestPipeline")
 
       val request = """{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}"""
-      val session = Session(requestBody = request)
+      val session = Session(requestBody = ByteString(request))
 
       val result = Await.result(pipeline.process(session), 5.seconds)
 

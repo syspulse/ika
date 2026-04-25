@@ -5,6 +5,7 @@ import java.util.concurrent.atomic.AtomicInteger
 
 import akka.http.scaladsl.model.HttpHeader
 import akka.http.scaladsl.model.{ContentType, ContentTypes, StatusCode, StatusCodes}
+import akka.util.ByteString
 
 /**
  * Session state controls pipeline flow.
@@ -63,11 +64,11 @@ case class Rejection(
  */
 case class Session private[processor] (
   // Request data
-  requestBody: String,
+  requestBody: ByteString,
   requestHeaderMap: Map[String, HttpHeader],
 
   // Response data
-  responseBody: Option[String],
+  responseBody: Option[ByteString],
   responseHeaderMap: Map[String, HttpHeader],
   responseSource: ResponseSource.Source,
   responseStatus: StatusCode,
@@ -156,7 +157,7 @@ case class Session private[processor] (
   /**
    * Update request body (for upstream processors to modify before HTTP)
    */
-  def withRequestBody(body: String): Session = {
+  def withRequestBody(body: ByteString): Session = {
     copy(requestBody = body)
   }
 
@@ -201,7 +202,7 @@ case class Session private[processor] (
    * Set response data
    */
   def withResponse(
-    body: String,
+    body: ByteString,
     source: ResponseSource.Source = ResponseSource.REMOTE,
     status: StatusCode = StatusCodes.OK,
     headers: Seq[HttpHeader] = Seq.empty,
@@ -219,7 +220,7 @@ case class Session private[processor] (
   /**
    * Set response body only
    */
-  def withResponseBody(body: String): Session = {
+  def withResponseBody(body: ByteString): Session = {
     copy(responseBody = Some(body))
   }
 
@@ -275,9 +276,9 @@ object Session {
     headers.map(h => headerKey(h) -> h).toMap
 
   def apply(
-    requestBody: String,
+    requestBody: ByteString,
     requestHeaders: Seq[HttpHeader] = Seq.empty,
-    responseBody: Option[String] = None,
+    responseBody: Option[ByteString] = None,
     responseHeaders: Seq[HttpHeader] = Seq.empty,
     responseSource: ResponseSource.Source = ResponseSource.LOCAL,
     responseStatus: StatusCode = StatusCodes.OK,

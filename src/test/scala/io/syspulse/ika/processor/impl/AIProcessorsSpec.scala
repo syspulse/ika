@@ -12,6 +12,7 @@ import io.syspulse.ika.telemetry.Telemetry
 import io.syspulse.ika.processor.ai.AIRouterProcessor
 import io.syspulse.ika.processor.ai.AITokensProcessor
 import akka.http.scaladsl.model.HttpHeader
+import akka.util.ByteString
 
 class AIProcessorsSpec extends AnyWordSpec with Matchers {
 
@@ -29,7 +30,7 @@ class AIProcessorsSpec extends AnyWordSpec with Matchers {
     "extract model with provider prefix and set pool" in {
       val processor = AIRouterProcessor(providers)
       val request = """{"model": "openai/gpt-4o-mini", "messages": []}"""
-      val session = Session(requestBody = request)
+      val session = Session(requestBody = ByteString(request))
 
       val result = Await.result(processor.process(session), 5.seconds)
 
@@ -43,7 +44,7 @@ class AIProcessorsSpec extends AnyWordSpec with Matchers {
     "route fixture request (suffix appended later by HttpProcessor)" in {
       val processor = new AIRouterProcessor(providerUris = providers)
       val request = loadAiFixture("REQ_chat_completion-1.json")
-      val session = Session(requestBody = request).putData("http.uriSuffix", "/test/1")
+      val session = Session(requestBody = ByteString(request)).putData("http.uriSuffix", "/test/1")
 
       val result = Await.result(processor.process(session), 5.seconds)
 
@@ -63,7 +64,7 @@ class AIProcessorsSpec extends AnyWordSpec with Matchers {
       )
 
       val request = loadAiFixture("REQ_chat_completion-1.json")
-      val session = Session(requestBody = request)
+      val session = Session(requestBody = ByteString(request))
 
       val result = Await.result(processor.process(session), 5.seconds)
 
@@ -75,7 +76,7 @@ class AIProcessorsSpec extends AnyWordSpec with Matchers {
     "extract model without provider prefix and use default" in {
       val processor = AIRouterProcessor(providers)
       val request = """{"model": "gpt-4", "messages": []}"""
-      val session = Session(requestBody = request)
+      val session = Session(requestBody = ByteString(request))
 
       val result = Await.result(processor.process(session), 5.seconds)
 
@@ -89,7 +90,7 @@ class AIProcessorsSpec extends AnyWordSpec with Matchers {
     "extract model with custom provider" in {
       val processor = AIRouterProcessor(providers + ("anthropic" -> "https://api.anthropic.com"))
       val request = """{"model": "anthropic/claude-3-opus", "messages": []}"""
-      val session = Session(requestBody = request)
+      val session = Session(requestBody = ByteString(request))
 
       val result = Await.result(processor.process(session), 5.seconds)
 
@@ -106,7 +107,7 @@ class AIProcessorsSpec extends AnyWordSpec with Matchers {
         modelProviderMapping = Map("gpt-4-custom" -> "claude")
       )
       val request = """{"model": "gpt-4-custom", "messages": []}"""
-      val session = Session(requestBody = request)
+      val session = Session(requestBody = ByteString(request))
 
       val result = Await.result(processor.process(session), 5.seconds)
 
@@ -120,7 +121,7 @@ class AIProcessorsSpec extends AnyWordSpec with Matchers {
     "reject request without model field" in {
       val processor = AIRouterProcessor(providers)
       val request = """{"messages": []}"""
-      val session = Session(requestBody = request)
+      val session = Session(requestBody = ByteString(request))
 
       val result = Await.result(processor.process(session), 5.seconds)
 
@@ -132,7 +133,7 @@ class AIProcessorsSpec extends AnyWordSpec with Matchers {
     "reject request with invalid JSON" in {
       val processor = AIRouterProcessor(providers)
       val request = """not valid json"""
-      val session = Session(requestBody = request)
+      val session = Session(requestBody = ByteString(request))
 
       val result = Await.result(processor.process(session), 5.seconds)
 
@@ -144,7 +145,7 @@ class AIProcessorsSpec extends AnyWordSpec with Matchers {
     "reject request with non-string model field" in {
       val processor = AIRouterProcessor(providers)
       val request = """{"model": 123, "messages": []}"""
-      val session = Session(requestBody = request)
+      val session = Session(requestBody = ByteString(request))
 
       val result = Await.result(processor.process(session), 5.seconds)
 
@@ -166,7 +167,7 @@ class AIProcessorsSpec extends AnyWordSpec with Matchers {
           "total_tokens": 30
         }
       }"""
-      val session = Session(requestBody = "test", responseBody = Some(response))
+      val session = Session(requestBody = ByteString("test"), responseBody = Some(ByteString(response)))
 
       val result = Await.result(processor.process(session), 5.seconds)
 
@@ -184,7 +185,7 @@ class AIProcessorsSpec extends AnyWordSpec with Matchers {
           "total_tokens": 50
         }
       }"""
-      val session = Session(requestBody = "test", responseBody = Some(response))
+      val session = Session(requestBody = ByteString("test"), responseBody = Some(ByteString(response)))
         .putData("telemetry", telemetry)
 
       Await.result(processor.process(session), 5.seconds)
@@ -195,7 +196,7 @@ class AIProcessorsSpec extends AnyWordSpec with Matchers {
     "handle response without usage field gracefully" in {
       val processor = AITokensProcessor()
       val response = """{"id": "chatcmpl-123", "choices": []}"""
-      val session = Session(requestBody = "test", responseBody = Some(response))
+      val session = Session(requestBody = ByteString("test"), responseBody = Some(ByteString(response)))
 
       val result = Await.result(processor.process(session), 5.seconds)
 
@@ -206,7 +207,7 @@ class AIProcessorsSpec extends AnyWordSpec with Matchers {
     "handle non-JSON response gracefully (streaming)" in {
       val processor = AITokensProcessor()
       val response = """data: {"delta": "text"}"""
-      val session = Session(requestBody = "test", responseBody = Some(response))
+      val session = Session(requestBody = ByteString("test"), responseBody = Some(ByteString(response)))
 
       val result = Await.result(processor.process(session), 5.seconds)
 
@@ -216,7 +217,7 @@ class AIProcessorsSpec extends AnyWordSpec with Matchers {
 
     "handle missing response body gracefully" in {
       val processor = AITokensProcessor()
-      val session = Session(requestBody = "test", responseBody = None)
+      val session = Session(requestBody = ByteString("test"), responseBody = None)
 
       val result = Await.result(processor.process(session), 5.seconds)
 
@@ -231,7 +232,7 @@ class AIProcessorsSpec extends AnyWordSpec with Matchers {
           "total_tokens": 100
         }
       }"""
-      val session = Session(requestBody = "test", responseBody = Some(response))
+      val session = Session(requestBody = ByteString("test"), responseBody = Some(ByteString(response)))
 
       val result = Await.result(processor.process(session), 5.seconds)
 

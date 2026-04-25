@@ -11,6 +11,7 @@ import scala.concurrent.duration._
 import akka.actor.ActorSystem
 
 import io.syspulse.ika.processor.Session
+import akka.util.ByteString
 
 class PoolProcessorDestinationsSpec extends AnyWordSpec with Matchers with BeforeAndAfterAll {
 
@@ -36,7 +37,7 @@ class PoolProcessorDestinationsSpec extends AnyWordSpec with Matchers with Befor
 
       val p = PoolProcessor.fromConfig("pool_1", cfg).head.asInstanceOf[PoolProcessor]
 
-      val s0 = Session(requestBody = "x")
+      val s0 = Session(requestBody = ByteString("x"))
       val s1 = Await.result(p.process(s0), 2.seconds)
 
       // Must be URI only (no "host1:" prefix)

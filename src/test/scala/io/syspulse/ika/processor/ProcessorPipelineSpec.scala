@@ -5,6 +5,7 @@ import org.scalatest.wordspec.AnyWordSpec
 import scala.concurrent.{Future, ExecutionContext, Await}
 import scala.concurrent.duration._
 import org.scalatest.concurrent.ScalaFutures
+import akka.util.ByteString
 
 class ProcessorPipelineSpec extends AnyWordSpec with Matchers with ScalaFutures {
 
@@ -57,7 +58,7 @@ class ProcessorPipelineSpec extends AnyWordSpec with Matchers with ScalaFutures 
         new AddHeaderProcessor("header2", "value2")
       )
 
-      val session = Session(requestBody = "test")
+      val session = Session(requestBody = ByteString("test"))
       val result = Await.result(pipeline.process(session), 5.seconds)
 
       result.getData[String]("destination") shouldBe Some("http://localhost:8545")
@@ -73,7 +74,7 @@ class ProcessorPipelineSpec extends AnyWordSpec with Matchers with ScalaFutures 
         counter // This should not be called
       )
 
-      val session = Session(requestBody = "test")
+      val session = Session(requestBody = ByteString("test"))
       val result = Await.result(pipeline.process(session), 5.seconds)
 
       result.isRejected shouldBe true
@@ -89,7 +90,7 @@ class ProcessorPipelineSpec extends AnyWordSpec with Matchers with ScalaFutures 
         new AddHeaderProcessor("after", "failure") // Should not be called
       )
 
-      val session = Session(requestBody = "test")
+      val session = Session(requestBody = ByteString("test"))
       val result = Await.result(pipeline.process(session), 5.seconds)
 
       result.isRejected shouldBe true
@@ -105,7 +106,7 @@ class ProcessorPipelineSpec extends AnyWordSpec with Matchers with ScalaFutures 
         new SetDestinationProcessor("http://localhost:8545")
       )
 
-      val session = Session(requestBody = "test")
+      val session = Session(requestBody = ByteString("test"))
       val result = Await.result(pipeline.process(session), 5.seconds)
 
       result.endTime shouldBe defined
@@ -115,7 +116,7 @@ class ProcessorPipelineSpec extends AnyWordSpec with Matchers with ScalaFutures 
     "handle empty pipeline" in {
       val pipeline = new ProcessorPipeline(Seq.empty)
 
-      val session = Session(requestBody = "test")
+      val session = Session(requestBody = ByteString("test"))
       val result = Await.result(pipeline.process(session), 5.seconds)
 
       result.isRejected shouldBe false
@@ -130,7 +131,7 @@ class ProcessorPipelineSpec extends AnyWordSpec with Matchers with ScalaFutures 
         new AddHeaderProcessor("step3", "done")
       )
 
-      val session = Session(requestBody = "test").putData("maxRetry", 5)
+      val session = Session(requestBody = ByteString("test")).putData("maxRetry", 5)
       val result = Await.result(pipeline.process(session), 5.seconds)
 
       result.getData[String]("destination") shouldBe Some("http://localhost:8545")

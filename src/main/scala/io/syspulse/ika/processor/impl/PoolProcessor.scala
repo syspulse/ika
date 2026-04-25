@@ -203,7 +203,7 @@ class PoolProcessor(
     }
 
     // Use request body as request ID for hash-based strategies
-    val requestId = session.requestBody.take(100)
+    val requestId = session.requestBody.take(100).utf8String
 
     // The cursor currently points at this processor. Downstream starts at cursor+1.
     val baseCursor = session.cursor.get()

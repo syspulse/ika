@@ -14,6 +14,7 @@ import scala.concurrent.ExecutionContext
 
 import io.syspulse.ika.processor.Session
 import io.syspulse.ika.processor.util.ProcessorPipelineBuilder
+import akka.util.ByteString
 
 class ProcessorPipelineBuilderFromConfigSpec extends AnyWordSpec with Matchers with ScalaFutures {
 
@@ -63,7 +64,7 @@ class ProcessorPipelineBuilderFromConfigSpec extends AnyWordSpec with Matchers w
       val pipeline = ProcessorPipelineBuilder.fromConfig(cfg)
       pipeline.toString should include("Http")
 
-      val s0 = Session(requestBody = """{"a":1}""", requestHeaders = Nil)
+      val s0 = Session(requestBody = ByteString("""{"a":1}"""), requestHeaders = Nil)
       whenReady(pipeline.process(s0)) { s1 =>
         val hs: Seq[HttpHeader] = s1.requestHeaders
         hs.exists(h => h.lowercaseName() == "x-test" && h.value() == "1") shouldBe true

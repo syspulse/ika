@@ -5,6 +5,7 @@ import scala.concurrent.duration._
 import com.typesafe.scalalogging.Logger
 import akka.actor.ActorSystem
 import akka.http.scaladsl.model.{HttpHeader, HttpMethod}
+import akka.util.ByteString
 
 import io.syspulse.ika.Config
 import io.syspulse.ika.processor.{Session, ProcessorPipeline}
@@ -36,8 +37,8 @@ class ProxyStorePipeline(
   /**
    * process request
    */
-  def proxy(method: HttpMethod, uriSuffix: String, req: String, headers: Seq[HttpHeader]): Future[Session] = {
-    log.debug(s"Processing request: ${req.take(100)}...")
+  def proxy(method: HttpMethod, uriSuffix: String, req: ByteString, headers: Seq[HttpHeader]): Future[Session] = {
+    log.debug(s"Processing request: ${req.take(100).size} bytes...")
 
     // Create initial session
     val session = Session(
@@ -55,7 +56,7 @@ class ProxyStorePipeline(
       log.error(s"Pipeline execution failed: ${ex.getMessage}", ex)
       Session(requestBody = req, requestHeaders = headers)
         .reject(code = -32603, message = s"Pipeline error: ${ex.getMessage}", processorName = "ProxyStorePipeline")
-        .withResponse(s"""{"jsonrpc": "2.0", "error": {"code": -32603, "message": "Pipeline error: ${ex.getMessage}"}, "id": null}""")
+        .withResponse(ByteString(s"""{"jsonrpc": "2.0", "error": {"code": -32603, "message": "Pipeline error: ${ex.getMessage}"}, "id": null}"""))
     }
   }
 

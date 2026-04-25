@@ -10,6 +10,7 @@ import scala.concurrent.Future
 import akka.actor.typed.ActorRef
 import akka.actor.typed.Behavior
 import akka.actor.typed.scaladsl.Behaviors
+import akka.util.ByteString
 
 import io.syspulse.skel.Command
 
@@ -22,8 +23,8 @@ object ProxyRegistry {
   val log = Logger(s"${this}")
 
   implicit val ec: scala.concurrent.ExecutionContext = scala.concurrent.ExecutionContext.global
-    
-  final case class ProxyReq(method: HttpMethod, uriSuffix: String, req: String, headers: Seq[HttpHeader], replyTo: ActorRef[Try[Session]]) extends Command  
+
+  final case class ProxyReq(method: HttpMethod, uriSuffix: String, req: ByteString, headers: Seq[HttpHeader], replyTo: ActorRef[Try[Session]]) extends Command  
   
   def apply(store: ProxyStore): Behavior[io.syspulse.skel.Command] = {
     registry(store)

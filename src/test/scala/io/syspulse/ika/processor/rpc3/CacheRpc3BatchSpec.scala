@@ -14,6 +14,7 @@ import akka.actor.ActorSystem
 import io.syspulse.ika.processor.{Session, ProcessorPipeline}
 import io.syspulse.ika.processor.impl.HttpProcessor
 import io.syspulse.ika.processor.ResponseSource
+import akka.util.ByteString
 
 class CacheRpc3BatchSpec extends AnyWordSpec with Matchers with ScalaFutures {
 
@@ -70,11 +71,11 @@ class CacheRpc3BatchSpec extends AnyWordSpec with Matchers with ScalaFutures {
   def mockHttpProcessor()(implicit ec: ExecutionContext, actorSystem: ActorSystem): HttpProcessor = {
     new HttpProcessor(compression = "") {
       override def processRequest(session: Session): Future[Session] = {
-        val req = session.requestBody
+        val req = session.requestBody.utf8String
         val ids = req.parseJson.asInstanceOf[JsArray].elements.map(_.asJsObject.fields("id"))
         val response = JsArray(ids.map(mkOkRes).toVector).compactPrint
 
-        Future.successful(session.withResponse(response, ResponseSource.REMOTE))
+        Future.successful(session.withResponse(ByteString(response), ResponseSource.REMOTE))
       }
     }
   }
@@ -88,17 +89,17 @@ class CacheRpc3BatchSpec extends AnyWordSpec with Matchers with ScalaFutures {
       val http = new HttpProcessor(compression = "") {
         override def processRequest(session: Session): Future[Session] = {
           httpCalls += 1
-          Future.successful(session.withResponse("[]", ResponseSource.REMOTE))
+          Future.successful(session.withResponse(ByteString("[]"), ResponseSource.REMOTE))
         }
       }
 
       // Cache processor calls downstream itself (request+response in one pass)
       val pipeline = ProcessorPipeline.fromSeq(Seq(cache, http), "TestPipeline")
-      val session = Session(requestBody = "[]")
+      val session = Session(requestBody = ByteString("[]"))
 
       val result = pipeline.process(session).futureValue
 
-      result.responseBody shouldBe Some("[]")
+      result.responseBody.map(_.utf8String) shouldBe Some("[]")
       result.responseSource shouldBe ResponseSource.CACHE
       httpCalls shouldBe 0
     }
@@ -120,12 +121,12 @@ class CacheRpc3BatchSpec extends AnyWordSpec with Matchers with ScalaFutures {
       val req = s"[${mkReq(1)}]"
 
       // First call - should hit HTTP
-      val result1 = pipeline.process(Session(requestBody = req)).futureValue
+      val result1 = pipeline.process(Session(requestBody = ByteString(req))).futureValue
       result1.responseSource shouldBe ResponseSource.REMOTE
       httpCalls shouldBe 1
 
       // Second call - should be cached
-      val result2 = pipeline.process(Session(requestBody = req)).futureValue
+      val result2 = pipeline.process(Session(requestBody = ByteString(req))).futureValue
       result2.responseSource shouldBe ResponseSource.CACHE
       httpCalls shouldBe 1  // Still 1, no additional HTTP call
     }
@@ -147,12 +148,12 @@ class CacheRpc3BatchSpec extends AnyWordSpec with Matchers with ScalaFutures {
       val req = s"[${mkReq(1)},${mkReq(2)},${mkReq(3)}]"
 
       // First call - should hit HTTP
-      val result1 = pipeline.process(Session(requestBody = req)).futureValue
+      val result1 = pipeline.process(Session(requestBody = ByteString(req))).futureValue
       result1.responseSource shouldBe ResponseSource.REMOTE
       httpCalls shouldBe 1
 
       // Second call - should be cached
-      val result2 = pipeline.process(Session(requestBody = req)).futureValue
+      val result2 = pipeline.process(Session(requestBody = ByteString(req))).futureValue
       result2.responseSource shouldBe ResponseSource.CACHE
       httpCalls shouldBe 1  // Still 1, no additional HTTP call
     }
@@ -162,13 +163,13 @@ class CacheRpc3BatchSpec extends AnyWordSpec with Matchers with ScalaFutures {
 
       val http = new HttpProcessor(compression = "") {
         override def processRequest(session: Session): Future[Session] = {
-          val req = session.requestBody
+          val req = session.requestBody.utf8String
           val ids = req.parseJson.asInstanceOf[JsArray].elements.map(_.asJsObject.fields("id"))
           // Intentionally drop the last element to emulate a broken upstream response
           val dropped = ids.dropRight(1)
           val response = JsArray(dropped.map(mkOkRes).toVector).compactPrint
 
-          Future.successful(session.withResponse(response, ResponseSource.REMOTE))
+          Future.successful(session.withResponse(ByteString(response), ResponseSource.REMOTE))
         }
       }
 
@@ -176,7 +177,7 @@ class CacheRpc3BatchSpec extends AnyWordSpec with Matchers with ScalaFutures {
       val pipeline = ProcessorPipeline.fromSeq(Seq(cache, http), "TestPipeline")
       val req = s"[${mkReq(1)},${mkReq(2)}]"
 
-      val result = pipeline.process(Session(requestBody = req)).futureValue
+      val result = pipeline.process(Session(requestBody = ByteString(req))).futureValue
       result.isRejected shouldBe true
       result.rejection.get.message should include("response size")
       result.rejection.get.message should include("expected=")
@@ -187,12 +188,12 @@ class CacheRpc3BatchSpec extends AnyWordSpec with Matchers with ScalaFutures {
 
       val http = new HttpProcessor(compression = "") {
         override def processRequest(session: Session): Future[Session] = {
-          val req = session.requestBody
+          val req = session.requestBody.utf8String
           val ids = req.parseJson.asInstanceOf[JsArray].elements.map(_.asJsObject.fields("id"))
           val droppedFirst = ids.drop(1)
           val response = JsArray(droppedFirst.map(mkOkRes).toVector).compactPrint
 
-          Future.successful(session.withResponse(response, ResponseSource.REMOTE))
+          Future.successful(session.withResponse(ByteString(response), ResponseSource.REMOTE))
         }
       }
 
@@ -200,7 +201,7 @@ class CacheRpc3BatchSpec extends AnyWordSpec with Matchers with ScalaFutures {
       val pipeline = ProcessorPipeline.fromSeq(Seq(cache, http), "TestPipeline")
       val req = s"[${mkReq(1)},${mkReq(2)},${mkReq(3)}]"
 
-      val result = pipeline.process(Session(requestBody = req)).futureValue
+      val result = pipeline.process(Session(requestBody = ByteString(req))).futureValue
       result.isRejected shouldBe true
       result.rejection.get.message should include("response size")
     }
@@ -210,13 +211,13 @@ class CacheRpc3BatchSpec extends AnyWordSpec with Matchers with ScalaFutures {
 
       val http = new HttpProcessor(compression = "") {
         override def processRequest(session: Session): Future[Session] = {
-          val req = session.requestBody
+          val req = session.requestBody.utf8String
           val ids = req.parseJson.asInstanceOf[JsArray].elements.map(_.asJsObject.fields("id")).toVector
           // Drop the middle element (index 1)
           val kept = ids.zipWithIndex.collect { case (v, i) if i != 1 => v }
           val response = JsArray(kept.map(mkOkRes)).compactPrint
 
-          Future.successful(session.withResponse(response, ResponseSource.REMOTE))
+          Future.successful(session.withResponse(ByteString(response), ResponseSource.REMOTE))
         }
       }
 
@@ -224,7 +225,7 @@ class CacheRpc3BatchSpec extends AnyWordSpec with Matchers with ScalaFutures {
       val pipeline = ProcessorPipeline.fromSeq(Seq(cache, http), "TestPipeline")
       val req = s"[${mkReq(1)},${mkReq(2)},${mkReq(3)}]"
 
-      val result = pipeline.process(Session(requestBody = req)).futureValue
+      val result = pipeline.process(Session(requestBody = ByteString(req))).futureValue
       result.isRejected shouldBe true
       result.rejection.get.message should include("response size")
     }
@@ -234,12 +235,12 @@ class CacheRpc3BatchSpec extends AnyWordSpec with Matchers with ScalaFutures {
 
       val http = new HttpProcessor(compression = "") {
         override def processRequest(session: Session): Future[Session] = {
-          val req = session.requestBody
+          val req = session.requestBody.utf8String
           val ids = req.parseJson.asInstanceOf[JsArray].elements.map(_.asJsObject.fields("id"))
           val droppedLast = ids.dropRight(1)
           val response = JsArray(droppedLast.map(mkOkRes).toVector).compactPrint
 
-          Future.successful(session.withResponse(response, ResponseSource.REMOTE))
+          Future.successful(session.withResponse(ByteString(response), ResponseSource.REMOTE))
         }
       }
 
@@ -247,7 +248,7 @@ class CacheRpc3BatchSpec extends AnyWordSpec with Matchers with ScalaFutures {
       val pipeline = ProcessorPipeline.fromSeq(Seq(cache, http), "TestPipeline")
       val req = s"[${mkReq(1)},${mkReq(2)},${mkReq(3)}]"
 
-      val result = pipeline.process(Session(requestBody = req)).futureValue
+      val result = pipeline.process(Session(requestBody = ByteString(req))).futureValue
       result.isRejected shouldBe true
       result.rejection.get.message should include("response size")
     }
@@ -257,13 +258,13 @@ class CacheRpc3BatchSpec extends AnyWordSpec with Matchers with ScalaFutures {
 
       val http = new HttpProcessor(compression = "") {
         override def processRequest(session: Session): Future[Session] = {
-          val req = session.requestBody
+          val req = session.requestBody.utf8String
           val ids = req.parseJson.asInstanceOf[JsArray].elements.map(_.asJsObject.fields("id")).toVector
           // Keep only the first item, drop the rest
           val kept = ids.take(1)
           val response = JsArray(kept.map(mkOkRes)).compactPrint
 
-          Future.successful(session.withResponse(response, ResponseSource.REMOTE))
+          Future.successful(session.withResponse(ByteString(response), ResponseSource.REMOTE))
         }
       }
 
@@ -271,7 +272,7 @@ class CacheRpc3BatchSpec extends AnyWordSpec with Matchers with ScalaFutures {
       val pipeline = ProcessorPipeline.fromSeq(Seq(cache, http), "TestPipeline")
       val req = s"[${mkReq(1)},${mkReq(2)},${mkReq(3)},${mkReq(4)}]"
 
-      val result = pipeline.process(Session(requestBody = req)).futureValue
+      val result = pipeline.process(Session(requestBody = ByteString(req))).futureValue
       result.isRejected shouldBe true
       result.rejection.get.message should include("response size")
     }
@@ -284,11 +285,11 @@ class CacheRpc3BatchSpec extends AnyWordSpec with Matchers with ScalaFutures {
         val http = new HttpProcessor(compression = "") {
           override def processRequest(session: Session): Future[Session] = {
             httpCalls += 1
-            val req = session.requestBody
+            val req = session.requestBody.utf8String
             val ids = req.parseJson.asInstanceOf[JsArray].elements.map(_.asJsObject.fields("id"))
             val response = JsArray(ids.map(mkOkRes).toVector).compactPrint
 
-            Future.successful(session.withResponse(response, ResponseSource.REMOTE))
+            Future.successful(session.withResponse(ByteString(response), ResponseSource.REMOTE))
           }
         }
 
@@ -308,23 +309,23 @@ class CacheRpc3BatchSpec extends AnyWordSpec with Matchers with ScalaFutures {
 
             // Pre-cache by running through pipeline once
             val singleReq = s"[${mkReq(idNum, params = s"[${idNum}]")}]"
-            pipeline.process(Session(requestBody = singleReq)).futureValue
+            pipeline.process(Session(requestBody = ByteString(singleReq))).futureValue
           }
         }
 
         // Reset HTTP call counter after seeding
         httpCalls = 0
 
-        val r1 = pipeline.process(Session(requestBody = req)).futureValue
-        idsOfBatchResponse(r1.responseBody.get).map(jsIdToInt) should ===(allIds)
+        val r1 = pipeline.process(Session(requestBody = ByteString(req))).futureValue
+        idsOfBatchResponse(r1.responseBody.get.utf8String).map(jsIdToInt) should ===(allIds)
 
         if (cachedIds.size == allIds.size) httpCalls shouldBe 0
         else httpCalls shouldBe 1
 
         // Second call should now be fully cached
         httpCalls = 0
-        val r2 = pipeline.process(Session(requestBody = req)).futureValue
-        idsOfBatchResponse(r2.responseBody.get).map(jsIdToInt) should ===(allIds)
+        val r2 = pipeline.process(Session(requestBody = ByteString(req))).futureValue
+        idsOfBatchResponse(r2.responseBody.get.utf8String).map(jsIdToInt) should ===(allIds)
         httpCalls shouldBe 0
       }
 
@@ -354,20 +355,20 @@ class CacheRpc3BatchSpec extends AnyWordSpec with Matchers with ScalaFutures {
       val http = new HttpProcessor(compression = "") {
         override def processRequest(session: Session): Future[Session] = {
           httpCalls += 1
-          Future.successful(session.withResponse(rsp, ResponseSource.REMOTE))
+          Future.successful(session.withResponse(ByteString(rsp), ResponseSource.REMOTE))
         }
       }
 
       val pipeline = ProcessorPipeline.fromSeq(Seq(cache, http), "TestPipeline")
 
-      val r1 = pipeline.process(Session(requestBody = req)).futureValue
+      val r1 = pipeline.process(Session(requestBody = ByteString(req))).futureValue
       r1.responseSource shouldBe ResponseSource.REMOTE
-      jsonCanon(r1.responseBody.get) shouldBe jsonCanon(rsp)
+      jsonCanon(r1.responseBody.get.utf8String) shouldBe jsonCanon(rsp)
       httpCalls shouldBe 1
 
-      val r2 = pipeline.process(Session(requestBody = req)).futureValue
+      val r2 = pipeline.process(Session(requestBody = ByteString(req))).futureValue
       r2.responseSource shouldBe ResponseSource.CACHE
-      jsonCanon(r2.responseBody.get) shouldBe jsonCanon(rsp)
+      jsonCanon(r2.responseBody.get.utf8String) shouldBe jsonCanon(rsp)
       httpCalls shouldBe 1
     }
 
@@ -380,18 +381,18 @@ class CacheRpc3BatchSpec extends AnyWordSpec with Matchers with ScalaFutures {
       val http = new HttpProcessor(compression = "") {
         override def processRequest(session: Session): Future[Session] = {
           httpCalls += 1
-          Future.successful(session.withResponse(rsp, ResponseSource.REMOTE))
+          Future.successful(session.withResponse(ByteString(rsp), ResponseSource.REMOTE))
         }
       }
 
       val pipeline = ProcessorPipeline.fromSeq(Seq(cache, http), "TestPipeline")
 
-      val r1 = pipeline.process(Session(requestBody = req)).futureValue
+      val r1 = pipeline.process(Session(requestBody = ByteString(req))).futureValue
       r1.responseSource shouldBe ResponseSource.REMOTE
-      jsonCanon(r1.responseBody.get) shouldBe jsonCanon(rsp)
+      jsonCanon(r1.responseBody.get.utf8String) shouldBe jsonCanon(rsp)
       httpCalls shouldBe 1
 
-      val r2 = pipeline.process(Session(requestBody = req)).futureValue
+      val r2 = pipeline.process(Session(requestBody = ByteString(req))).futureValue
       r2.responseSource shouldBe ResponseSource.CACHE
       httpCalls shouldBe 1
     }
@@ -406,18 +407,18 @@ class CacheRpc3BatchSpec extends AnyWordSpec with Matchers with ScalaFutures {
       val http = new HttpProcessor(compression = "") {
         override def processRequest(session: Session): Future[Session] = {
           httpCalls += 1
-          Future.successful(session.withResponse(rsp, ResponseSource.REMOTE))
+          Future.successful(session.withResponse(ByteString(rsp), ResponseSource.REMOTE))
         }
       }
 
       val pipeline = ProcessorPipeline.fromSeq(Seq(cache, http), "TestPipeline")
 
-      val r1 = pipeline.process(Session(requestBody = req)).futureValue
+      val r1 = pipeline.process(Session(requestBody = ByteString(req))).futureValue
       r1.responseSource shouldBe ResponseSource.REMOTE
-      jsonCanon(r1.responseBody.get) shouldBe jsonCanon(rsp)
+      jsonCanon(r1.responseBody.get.utf8String) shouldBe jsonCanon(rsp)
       httpCalls shouldBe 1
 
-      val r2 = pipeline.process(Session(requestBody = req)).futureValue
+      val r2 = pipeline.process(Session(requestBody = ByteString(req))).futureValue
       r2.responseSource shouldBe ResponseSource.CACHE
       httpCalls shouldBe 1
     }
@@ -432,17 +433,17 @@ class CacheRpc3BatchSpec extends AnyWordSpec with Matchers with ScalaFutures {
       val http = new HttpProcessor(compression = "") {
         override def processRequest(session: Session): Future[Session] = {
           httpCalls += 1
-          Future.successful(session.withResponse(rsp, ResponseSource.REMOTE))
+          Future.successful(session.withResponse(ByteString(rsp), ResponseSource.REMOTE))
         }
       }
 
       val pipeline = ProcessorPipeline.fromSeq(Seq(cache, http), "TestPipeline")
 
-      val r1 = pipeline.process(Session(requestBody = req)).futureValue
-      jsonCanon(r1.responseBody.get) shouldBe jsonCanon(rsp)
+      val r1 = pipeline.process(Session(requestBody = ByteString(req))).futureValue
+      jsonCanon(r1.responseBody.get.utf8String) shouldBe jsonCanon(rsp)
       httpCalls shouldBe 1
 
-      val r2 = pipeline.process(Session(requestBody = req)).futureValue
+      val r2 = pipeline.process(Session(requestBody = ByteString(req))).futureValue
       r2.responseSource shouldBe ResponseSource.CACHE
       httpCalls shouldBe 1
     }
@@ -456,19 +457,19 @@ class CacheRpc3BatchSpec extends AnyWordSpec with Matchers with ScalaFutures {
       val http = new HttpProcessor(compression = "") {
         override def processRequest(session: Session): Future[Session] = {
           httpCalls += 1
-          Future.successful(session.withResponse(rsp, ResponseSource.REMOTE))
+          Future.successful(session.withResponse(ByteString(rsp), ResponseSource.REMOTE))
         }
       }
 
       val pipeline = ProcessorPipeline.fromSeq(Seq(cache, http), "TestPipeline")
 
-      val r1 = pipeline.process(Session(requestBody = req)).futureValue
+      val r1 = pipeline.process(Session(requestBody = ByteString(req))).futureValue
       r1.isRejected shouldBe false
-      jsonCanon(r1.responseBody.get) shouldBe jsonCanon(rsp)
+      jsonCanon(r1.responseBody.get.utf8String) shouldBe jsonCanon(rsp)
       httpCalls shouldBe 1
 
-      val r2 = pipeline.process(Session(requestBody = req)).futureValue
-      jsonCanon(r2.responseBody.get) shouldBe jsonCanon(rsp)
+      val r2 = pipeline.process(Session(requestBody = ByteString(req))).futureValue
+      jsonCanon(r2.responseBody.get.utf8String) shouldBe jsonCanon(rsp)
       httpCalls shouldBe 2
     }
 
@@ -481,16 +482,16 @@ class CacheRpc3BatchSpec extends AnyWordSpec with Matchers with ScalaFutures {
       val http = new HttpProcessor(compression = "") {
         override def processRequest(session: Session): Future[Session] = {
           httpCalls += 1
-          Future.successful(session.withResponse(rsp, ResponseSource.REMOTE))
+          Future.successful(session.withResponse(ByteString(rsp), ResponseSource.REMOTE))
         }
       }
 
       val pipeline = ProcessorPipeline.fromSeq(Seq(cache, http), "TestPipeline")
 
-      pipeline.process(Session(requestBody = req)).futureValue
+      pipeline.process(Session(requestBody = ByteString(req))).futureValue
       httpCalls shouldBe 1
 
-      pipeline.process(Session(requestBody = req)).futureValue
+      pipeline.process(Session(requestBody = ByteString(req))).futureValue
       httpCalls shouldBe 2
     }
   }

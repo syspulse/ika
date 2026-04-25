@@ -63,7 +63,7 @@ class AITokensProcessor(implicit ec: ExecutionContext) extends ResponseProcessor
       case Some(responseBody) =>
         try {
           // Parse response body as JSON
-          val json = responseBody.parseJson.asJsObject
+          val json = responseBody.utf8String.parseJson.asJsObject
 
           if (isErrorResponse(json)) {
             // Provider returned an error payload

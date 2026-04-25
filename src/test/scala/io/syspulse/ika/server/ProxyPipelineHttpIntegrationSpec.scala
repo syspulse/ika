@@ -28,6 +28,7 @@ import io.syspulse.ika.processor.impl.{
 }
 import io.syspulse.ika.processor.rpc3.Rpc3Processor
 import io.syspulse.ika.store.{ProxyStore, ProxyStorePipeline}
+import akka.util.ByteString
 
 /**
  * End-to-end tests: mock JSON-RPC backend (HTTP) → proxy pipeline ([[ProxyStorePipeline]]) →
@@ -70,11 +71,11 @@ class ProxyPipelineHttpIntegrationSpec
     post {
       pathEndOrSingleSlash {
         entity(as[String]) { body =>
-          onSuccess(store.proxy(HttpMethods.POST, "/", body, Nil)) { sess =>
+          onSuccess(store.proxy(HttpMethods.POST, "/", ByteString(body), Nil)) { sess =>
             complete(
               HttpResponse(
                 status = sess.responseStatus,
-                entity = HttpEntity(ContentTypes.`application/json`, sess.responseBody.getOrElse(""))
+                entity = HttpEntity(ContentTypes.`application/json`, sess.responseBody.map(_.utf8String).getOrElse(""))
               )
             )
           }

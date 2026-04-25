@@ -5,6 +5,7 @@ import com.typesafe.scalalogging.Logger
 import com.typesafe.config.{Config => TypesafeConfig}
 import akka.actor.ActorSystem
 import akka.http.scaladsl.model.{ContentTypes, StatusCode}
+import akka.util.ByteString
 
 import io.syspulse.ika.processor.{Processor, Session, Rejection}
 import io.syspulse.ika.processor.ResponseSource
@@ -39,7 +40,7 @@ abstract class RejectionProcessor(implicit ec: ExecutionContext) extends Process
   /**
    * Convert rejection to response body
    */
-  def formatRejection(rejection: Rejection, session: Session): String
+  def formatRejection(rejection: Rejection, session: Session): ByteString
 
   /**
    * Determine HTTP status code from rejection
@@ -106,7 +107,7 @@ class JsonRpcRejectionProcessor(
   override def toString: String =
     s"$name($httpStatusCode, $includeProcessor, $includeDetails)"
 
-  def formatRejection(rejection: Rejection, session: Session): String = {
+  def formatRejection(rejection: Rejection, session: Session): ByteString = {
     val dataFields = Seq(
       if (includeProcessor) Some(s""""processor": "${rejection.processorName}"""") else None,
       if (includeDetails && rejection.details.isDefined) Some(s""""details": "${rejection.details.get}"""") else None
@@ -118,7 +119,7 @@ class JsonRpcRejectionProcessor(
       ""
     }
 
-    s"""{"jsonrpc": "2.0", "error": {"code": ${rejection.code}, "message": "${rejection.message}"${dataJson}}, "id": null}"""
+    ByteString(s"""{"jsonrpc": "2.0", "error": {"code": ${rejection.code}, "message": "${rejection.message}"${dataJson}}, "id": null}""")
   }
 
   def getHttpStatusCode(rejection: Rejection, session: Session): Int = {
@@ -158,7 +159,7 @@ class RestApiRejectionProcessor(
   override def toString: String =
     s"$name($defaultHttpStatus, $includeProcessor, $includeDetails)"
 
-  def formatRejection(rejection: Rejection, session: Session): String = {
+  def formatRejection(rejection: Rejection, session: Session): ByteString = {
     val fields = Seq(
       Some(s""""code": "${rejection.code}""""),
       Some(s""""message": "${rejection.message}""""),
@@ -166,7 +167,7 @@ class RestApiRejectionProcessor(
       if (includeDetails && rejection.details.isDefined) Some(s""""details": "${rejection.details.get}"""") else None
     ).flatten
 
-    s"""{"error": { ${fields.mkString(", ")} }}"""
+    ByteString(s"""{"error": { ${fields.mkString(", ")} }}""")
   }
 
   def getHttpStatusCode(rejection: Rejection, session: Session): Int = {
@@ -189,7 +190,7 @@ class RestApiRejectionProcessor(
  * Provides a flexible way to create custom error formats without creating a new class.
  */
 class CustomRejectionProcessor(
-  formatter: (Rejection, Session) => String,
+  formatter: (Rejection, Session) => ByteString,
   statusCodeMapper: (Rejection, Session) => Int
 )(implicit ec: ExecutionContext) extends RejectionProcessor {
 
@@ -197,7 +198,7 @@ class CustomRejectionProcessor(
 
   override def toString: String = s"$name($formatter, $statusCodeMapper)"
 
-  def formatRejection(rejection: Rejection, session: Session): String = {
+  def formatRejection(rejection: Rejection, session: Session): ByteString = {
     formatter(rejection, session)
   }
 
@@ -233,7 +234,7 @@ object RejectionProcessor {
    * Create custom rejection processor
    */
   def custom(
-    formatter: (Rejection, Session) => String,
+    formatter: (Rejection, Session) => ByteString,
     statusCodeMapper: (Rejection, Session) => Int
   )(implicit ec: ExecutionContext): CustomRejectionProcessor = {
     new CustomRejectionProcessor(formatter, statusCodeMapper)

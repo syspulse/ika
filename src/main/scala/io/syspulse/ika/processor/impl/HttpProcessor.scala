@@ -65,7 +65,7 @@ class HttpProcessor(
   private case class UpstreamResponse(
     status: StatusCode,
     headers: Seq[HttpHeader],
-    body: String,
+    body: ByteString,
     contentType: ContentType
   )
 
@@ -141,7 +141,7 @@ class HttpProcessor(
   private def makeRequest(
     method: akka.http.scaladsl.model.HttpMethod,
     uri: String,
-    body: String,
+    body: ByteString,
     headers: Seq[HttpHeader],
     connectTimeoutMs: Long,
     responseTimeoutMs: Long,
@@ -158,19 +158,12 @@ class HttpProcessor(
 
     val entity = method match {
       case HttpMethods.GET => HttpEntity.Empty
-      case _               =>
-        contentType match {
-          case nb: ContentType.NonBinary =>
-            HttpEntity(nb, body)
-          case other =>
-            // Fall back to bytes for binary / unknown content types
-            HttpEntity(other, ByteString(body))
-        }
+      case _               => HttpEntity(contentType, body)
     }
 
     val request = HttpRequest(method = method, uri = uri, headers = requestHeaders, entity = entity)
 
-    log.debug(s"HTTP ${method.value} request: ${uri}, headers=${requestHeaders}, body=${body}")
+    log.debug(s"HTTP ${method.value} request: ${uri}, headers=${requestHeaders}, body size=${body.size} bytes")
 
     val httpF = Http()
       .singleRequest(request, settings = createPoolSettings(connectTimeoutMs))
@@ -178,12 +171,11 @@ class HttpProcessor(
       .flatMap { res =>
         val bodyFuture = res.entity.dataBytes.runReduce(_ ++ _)
         bodyFuture.map { data =>
-          val responseBody = data.utf8String
-          log.debug(s"Response: status=${res.status}, body=${responseBody.take(200)}...")
+          log.debug(s"Response: status=${res.status}, body size=${data.size} bytes")
           UpstreamResponse(
             status = res.status,
             headers = res.headers,
-            body = responseBody,
+            body = data,
             contentType = res.entity.contentType
           )
         }

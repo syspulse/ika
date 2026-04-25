@@ -10,6 +10,7 @@ import akka.http.scaladsl.model.HttpHeader
 import akka.http.scaladsl.model.headers.RawHeader
 
 import io.syspulse.ika.processor.ResponseSource
+import akka.util.ByteString
 
 /**
  * Specs for [[Session.withRequestBody]] / [[Session.withResponse]] flowing through
@@ -27,7 +28,7 @@ class RequestResponseBodySpec extends AnyWordSpec with Matchers {
   private class PrefixRequestBodyProcessor(prefix: String) extends RequestProcessor {
     def name: String = "PrefixRequestBody"
     def processRequest(session: Session): Future[Session] =
-      Future.successful(session.withRequestBody(prefix + session.requestBody))
+      Future.successful(session.withRequestBody(ByteString(prefix + session.requestBody.utf8String)))
   }
 
   /** Rewrites JSON-RPC `id` (simple string replace for tests). */
@@ -35,8 +36,8 @@ class RequestResponseBodySpec extends AnyWordSpec with Matchers {
     def name: String = "RewriteJsonId"
     def processRequest(session: Session): Future[Session] = {
       val replaced =
-        session.requestBody.replaceFirst("\"id\"\\s*:\\s*\\d+", "\"id\": " + newId)
-      Future.successful(session.withRequestBody(replaced))
+        session.requestBody.utf8String.replaceFirst("\"id\"\\s*:\\s*\\d+", "\"id\": " + newId)
+      Future.successful(session.withRequestBody(ByteString(replaced)))
     }
   }
 
@@ -74,7 +75,7 @@ class RequestResponseBodySpec extends AnyWordSpec with Matchers {
   private class EchoRequestAsResponseProcessor extends RequestProcessor {
     def name: String = "EchoBackend"
     def processRequest(session: Session): Future[Session] =
-      Future.successful(session.withResponse("echo:" + session.requestBody, ResponseSource.REMOTE))
+      Future.successful(session.withResponse(ByteString("echo:" + session.requestBody.utf8String), ResponseSource.REMOTE))
   }
 
   /** Echo plus fixed response headers (e.g. as if the origin returned `X-Backend-Trace`). */
@@ -82,7 +83,7 @@ class RequestResponseBodySpec extends AnyWordSpec with Matchers {
     def name: String = "EchoBackendWithRespHeaders"
     def processRequest(session: Session): Future[Session] =
       Future.successful(
-        session.withResponse("echo:" + session.requestBody, ResponseSource.REMOTE, headers = responseHeaders)
+        session.withResponse(ByteString("echo:" + session.requestBody.utf8String), ResponseSource.REMOTE, headers = responseHeaders)
       )
   }
 
@@ -94,7 +95,7 @@ class RequestResponseBodySpec extends AnyWordSpec with Matchers {
         session.responseBody match {
           case Some(body) =>
             session.copy(
-              responseBody = Some(body + suffix),
+              responseBody = Some(body ++ ByteString(suffix)),
               responseSource = session.responseSource,
               responseHeaderMap = session.responseHeaderMap
             )
@@ -111,7 +112,7 @@ class RequestResponseBodySpec extends AnyWordSpec with Matchers {
         session.responseBody match {
           case Some(body) =>
             session.copy(
-              responseBody = Some(s"""{"wrapped":true,"payload":$body}"""),
+              responseBody = Some(ByteString(s"""{"wrapped":true,"payload":${body.utf8String}}""")),
               responseSource = session.responseSource,
               responseHeaderMap = session.responseHeaderMap
             )
@@ -136,9 +137,9 @@ class RequestResponseBodySpec extends AnyWordSpec with Matchers {
         new SetDestinationProcessor("http://stub")
       )
       val in = """{"jsonrpc":"2.0","method":"x","params":[],"id":1}"""
-      val result = Await.result(pipeline.process(Session(requestBody = in)), 5.seconds)
+      val result = Await.result(pipeline.process(Session(requestBody = ByteString(in))), 5.seconds)
 
-      result.requestBody shouldBe
+      result.requestBody.utf8String shouldBe
         "REQ:" + """{"jsonrpc":"2.0","method":"x","params":[],"id": 99}"""
       result.getData[String]("destination") shouldBe Some("http://stub")
     }
@@ -151,9 +152,9 @@ class RequestResponseBodySpec extends AnyWordSpec with Matchers {
         new SuffixResponseBodyProcessor("|tail")
       )
       val in = """{"jsonrpc":"2.0","id":1}"""
-      val result = Await.result(pipeline.process(Session(requestBody = in)), 5.seconds)
+      val result = Await.result(pipeline.process(Session(requestBody = ByteString(in))), 5.seconds)
 
-      result.responseBody shouldBe Some(
+      result.responseBody.map(_.utf8String) shouldBe Some(
         """echo:{"jsonrpc":"2.0","id": 42}|tail"""
       )
     }
@@ -168,9 +169,9 @@ class RequestResponseBodySpec extends AnyWordSpec with Matchers {
         new SuffixResponseBodyProcessor("_s1"),
         new SuffixResponseBodyProcessor("_s2")
       )
-      val result = Await.result(pipeline.process(Session(requestBody = "ping")), 5.seconds)
+      val result = Await.result(pipeline.process(Session(requestBody = ByteString("ping"))), 5.seconds)
 
-      result.responseBody shouldBe Some("echo:ping_s1_s2")
+      result.responseBody.map(_.utf8String) shouldBe Some("echo:ping_s1_s2")
     }
 
     "allow wrapping JSON in a second ResponseProcessor" in {
@@ -179,9 +180,9 @@ class RequestResponseBodySpec extends AnyWordSpec with Matchers {
         new EchoRequestAsResponseProcessor(),
         new WrapJsonResponseProcessor()
       )
-      val result = Await.result(pipeline.process(Session(requestBody = "{}")), 5.seconds)
+      val result = Await.result(pipeline.process(Session(requestBody = ByteString("{}"))), 5.seconds)
 
-      result.responseBody shouldBe Some("""{"wrapped":true,"payload":echo:{}}""")
+      result.responseBody.map(_.utf8String) shouldBe Some("""{"wrapped":true,"payload":echo:{}}""")
     }
   }
 
@@ -194,10 +195,10 @@ class RequestResponseBodySpec extends AnyWordSpec with Matchers {
         new EchoRequestAsResponseProcessor(),
         new SuffixResponseBodyProcessor(":Z")
       )
-      val result = Await.result(pipeline.process(Session(requestBody = "body")), 5.seconds)
+      val result = Await.result(pipeline.process(Session(requestBody = ByteString("body"))), 5.seconds)
 
-      result.requestBody should startWith("A:")
-      result.responseBody shouldBe Some("echo:A:body:Z")
+      result.requestBody.utf8String should startWith("A:")
+      result.responseBody.map(_.utf8String) shouldBe Some("echo:A:body:Z")
     }
   }
 
@@ -210,7 +211,7 @@ class RequestResponseBodySpec extends AnyWordSpec with Matchers {
       )
       val headers = Seq(RawHeader("X-Keep", "ok"), RawHeader("X-Strip", "gone"), RawHeader("Other", "v"))
       val result = Await.result(
-        pipeline.process(Session(requestBody = "{}", requestHeaders = headers)),
+        pipeline.process(Session(requestBody = ByteString("{}"), requestHeaders = headers)),
         5.seconds
       )
 
@@ -225,7 +226,7 @@ class RequestResponseBodySpec extends AnyWordSpec with Matchers {
         new AddRequestHeaderProcessor(RawHeader("X-One", "1")),
         new AddRequestHeaderProcessor(RawHeader("X-Two", "2"))
       )
-      val result = Await.result(pipeline.process(Session(requestBody = "ping")), 5.seconds)
+      val result = Await.result(pipeline.process(Session(requestBody = ByteString("ping"))), 5.seconds)
 
       result.requestHeaders.map(_.name.toLowerCase).toSet should contain allOf ("x-one", "x-two")
       result.requestHeaders.find(_.is("x-one")).map(_.value) shouldBe Some("1")
@@ -238,7 +239,7 @@ class RequestResponseBodySpec extends AnyWordSpec with Matchers {
       )
       val headers = Seq(RawHeader("X-Token", "old-secret"), RawHeader("Y", "keep"))
       val result = Await.result(
-        pipeline.process(Session(requestBody = "{}", requestHeaders = headers)),
+        pipeline.process(Session(requestBody = ByteString("{}"), requestHeaders = headers)),
         5.seconds
       )
 
@@ -258,7 +259,7 @@ class RequestResponseBodySpec extends AnyWordSpec with Matchers {
         RawHeader("X-C", "c0")
       )
       val result = Await.result(
-        pipeline.process(Session(requestBody = "{}", requestHeaders = start)),
+        pipeline.process(Session(requestBody = ByteString("{}"), requestHeaders = start)),
         5.seconds
       )
 
@@ -277,7 +278,7 @@ class RequestResponseBodySpec extends AnyWordSpec with Matchers {
         new EchoRequestAsResponseWithHeadersProcessor(Seq(RawHeader("X-Backend", "node-1"))),
         new AddResponseHeaderProcessor(RawHeader("X-Proxy-Added", "yes"))
       )
-      val result = Await.result(pipeline.process(Session(requestBody = "hi")), 5.seconds)
+      val result = Await.result(pipeline.process(Session(requestBody = ByteString("hi"))), 5.seconds)
 
       result.responseHeaders.map(h => (h.name.toLowerCase, h.value)).toSet shouldBe Set(
         ("x-backend", "node-1"),
@@ -292,9 +293,9 @@ class RequestResponseBodySpec extends AnyWordSpec with Matchers {
         new SuffixResponseBodyProcessor("|z"),
         new AddResponseHeaderProcessor(RawHeader("X-After-Suffix", "1"))
       )
-      val result = Await.result(pipeline.process(Session(requestBody = "x")), 5.seconds)
+      val result = Await.result(pipeline.process(Session(requestBody = ByteString("x"))), 5.seconds)
 
-      result.responseBody shouldBe Some("echo:x|z")
+      result.responseBody.map(_.utf8String) shouldBe Some("echo:x|z")
       result.responseHeaders.map(_.name.toLowerCase).toSet should contain allOf ("x-upstream", "x-after-suffix")
     }
   }

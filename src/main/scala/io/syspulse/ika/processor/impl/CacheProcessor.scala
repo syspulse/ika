@@ -8,6 +8,7 @@ import com.typesafe.scalalogging.Logger
 
 import com.typesafe.config.{Config => TypesafeConfig}
 import akka.actor.ActorSystem
+import akka.util.ByteString
 
 import io.syspulse.ika.processor.{Processor, Session}
 import io.syspulse.ika.processor.uri.CacheURI
@@ -50,7 +51,7 @@ class CacheProcessor(
   override val name: String = "Cache"
 
   // Thread-safe cache storage
-  protected case class CacheEntry(ts: Long, response: String)
+  protected case class CacheEntry(ts: Long, response: ByteString)
   protected val cache: concurrent.Map[String, CacheEntry] = new ConcurrentHashMap[String, CacheEntry]().asScala
 
   // Garbage collection cron job (only for expire mode)
@@ -182,7 +183,7 @@ class CacheProcessor(
   /**
    * Handle response phase - cache successful responses
    */
-  protected def handleResponsePhase(session: Session, response: String): Future[Session] = {
+  protected def handleResponsePhase(session: Session, response: ByteString): Future[Session] = {
     // Skip if response came from cache
     session.getData[Boolean]("fromCache") match {
       case Some(true) =>
@@ -210,7 +211,7 @@ class CacheProcessor(
   /**
    * Store response in cache
    */
-  protected def storeInCache(session: Session, cacheKey: String, response: String): Future[Session] = {
+  protected def storeInCache(session: Session, cacheKey: String, response: ByteString): Future[Session] = {
     val now = System.currentTimeMillis()
     cache.put(cacheKey, CacheEntry(now, response))
     log.info(s"Caching response: $cacheKey")
@@ -224,7 +225,7 @@ class CacheProcessor(
    */
   protected def getCacheKey(session: Session): Option[String] = {
     // Default: use request body as key
-    Some(session.requestBody)
+    Some(session.requestBody.utf8String)
   }
 
   /**
@@ -240,7 +241,7 @@ class CacheProcessor(
    * Check if this response should be cached
    * Override in subclasses for protocol-specific logic (e.g., skip errors)
    */
-  protected def shouldCacheResponse(session: Session, response: String): Boolean = {
+  protected def shouldCacheResponse(session: Session, response: ByteString): Boolean = {
     // Default: cache all responses
     true
   }
