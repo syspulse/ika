@@ -61,7 +61,7 @@ class Rpc3Processor(
       Some(req.parseJson.convertTo[ProxyRpcReq])
     } catch {
       case e: Exception =>
-        log.debug(s"Failed to parse RPC request: ${e.getMessage}")
+        log.debug(s"Failed to parse RPC request: ${e.getMessage}: '${req}'")
         None
     }
   }
@@ -84,7 +84,7 @@ class Rpc3Processor(
             }
           }
         case _ =>
-          log.warn("Batch request is not a JSON array")
+          log.warn(s"Failed to parse batch request: not JSON array")
           Seq.empty
       }
     } catch {
@@ -154,7 +154,7 @@ class Rpc3Processor(
     val reqString = session.requestBody.utf8String
     // Only cache single JSON-RPC requests (not batch)
     if (!reqString.trim.startsWith("{")) {
-      log.debug("Skipping cache for non-single request (batch or invalid)")
+      log.warn("Cache: SKIP: non-single request (batch or invalid)")
       return None
     }
 
@@ -183,7 +183,7 @@ class Rpc3Processor(
   override protected def shouldCacheResponse(session: Session, response: ByteString): Boolean = {
     // Skip caching for error responses
     if (isError(response)) {
-      log.debug("Skipping cache for error response")
+      log.debug(s"Cache: SKIP: error response: '${response.utf8String}'")
       return false
     }
 
@@ -214,7 +214,7 @@ class Rpc3Processor(
     if (isLatestBlockNumber || isLatestBlock) {
       // Hot cache - shorter TTL for "latest" blocks
       cache.put(cacheKey, CacheEntry(now, response))
-      log.info(s"Caching 'latest' response (TTL=${ttlLatest}ms): $cacheKey")
+      log.debug(s"Cache: STORE: 'latest': $cacheKey")
 
       // For eth_getBlockByNumber with "latest", also cache with actual block number
       if (isLatestBlock) {
@@ -226,7 +226,7 @@ class Rpc3Processor(
             // Replace 'latest' with actual block number for cold cache
             val keyBlock = cacheKey.replaceAll("latest", blockNumber)
             cache.put(keyBlock, CacheEntry(now, response))
-            log.info(s"Caching block number response (TTL=${ttl}ms): $keyBlock")
+            log.debug(s"Cache: STORE: block: $keyBlock")
           }
         } catch {
           case e: Exception =>
@@ -236,7 +236,7 @@ class Rpc3Processor(
     } else {
       // Regular cache - normal TTL
       cache.put(cacheKey, CacheEntry(now, response))
-      log.info(s"Caching response (TTL=${ttl}ms): $cacheKey")
+      log.debug(s"Cache: STORE: $cacheKey")
     }
 
     Future.successful(session)
@@ -292,7 +292,7 @@ class Rpc3Processor(
     if (uncachedPairs.isEmpty) {
       // All cached - return early
       val response = ByteString(s"[${allPairs.map(_._2.get.utf8String).mkString(",")}]")
-      log.info(s"Batch cache HIT (all ${requests.size} items cached)")
+      log.debug(s"Cache: HIT: batch=${requests.size}")
       recordCacheHit(session)
 
       Future.successful(session
@@ -306,7 +306,7 @@ class Rpc3Processor(
       val uncachedRequests = uncachedPairs.map(_._1)
       val modifiedBatchRequest = ByteString(s"[${uncachedRequests.map(_.toJson.compactPrint).mkString(",")}]")
 
-      log.info(s"Batch cache PARTIAL (${cachedResponses.flatten.size} cached, ${uncachedPairs.size} uncached)")
+      log.debug(s"Cache: STORE: (${cachedResponses.flatten.size} cached, ${uncachedPairs.size} uncached)")
       recordCacheMiss(session)
 
       Future.successful(session
@@ -325,7 +325,7 @@ class Rpc3Processor(
     // Check if already fully cached
     session.getData[Boolean]("batchCached") match {
       case Some(true) =>
-        log.debug("Batch response already from cache, skipping")
+        log.debug("Cache: HIT")
         return Future.successful(session)
       case _ => // Continue
     }
@@ -333,7 +333,7 @@ class Rpc3Processor(
     // Get the original request/response pairs
     session.getData[Seq[(ProxyRpcReq, Option[ByteString])]]("batchAllPairs") match {
       case None =>
-        log.debug("No batch metadata found, skipping batch assembly")
+        log.debug("Cache: MISS: No batch metadata found, skipping batch assembly")
         return Future.successful(session)
 
       case Some(allPairs) =>
@@ -356,7 +356,7 @@ class Rpc3Processor(
 
         // Validate response count matches uncached count
         if (freshResponses.size != uncachedPairs.size) {
-          val msg = s"Batch response size mismatch: response size=${freshResponses.size}, expected=${uncachedPairs.size}"
+          val msg = s"Cache: Batch response mismatch: response size=${freshResponses.size}, expected=${uncachedPairs.size}"
           log.error(msg)
           return Future.successful(session.reject(
             code = -32603,
@@ -372,7 +372,7 @@ class Rpc3Processor(
             val key = getKey(req)
             storeSingleInCache(key, ByteString(freshResp), now)
           } else {
-            log.debug(s"Skipping cache for error response: ${req.method}")
+            log.debug(s"Cache: SKIP: error response: ${req.method}")
           }
         }
 
@@ -387,7 +387,7 @@ class Rpc3Processor(
         }
 
         val finalResponse = ByteString(s"[${assembled.mkString(",")}]")
-        log.debug(s"Assembled batch response with ${assembled.size} items")
+        log.debug(s"Cache: HIT: Assembled batch: ${assembled.size}")
 
         Future.successful(session.withResponseBody(finalResponse))
     }
@@ -420,7 +420,7 @@ class Rpc3Processor(
     if (isLatestBlockNumber || isLatestBlock) {
       // Hot cache - shorter TTL for "latest" blocks
       cache.put(cacheKey, CacheEntry(now, response))
-      log.debug(s"Cached 'latest' response (TTL=${ttlLatest}ms): $cacheKey")
+      log.debug(s"Cache: 'latest': $cacheKey")
 
       // For eth_getBlockByNumber with "latest", also cache with actual block number
       if (isLatestBlock) {
@@ -432,7 +432,7 @@ class Rpc3Processor(
             // Replace 'latest' with actual block number for cold cache
             val keyBlock = cacheKey.replaceAll("latest", blockNumber)
             cache.put(keyBlock, CacheEntry(now, response))
-            log.debug(s"Cached block number response (TTL=${ttl}ms): $keyBlock")
+            log.debug(s"Cache: block: $keyBlock")
           }
         } catch {
           case e: Exception =>
@@ -442,7 +442,7 @@ class Rpc3Processor(
     } else {
       // Regular cache - normal TTL
       cache.put(cacheKey, CacheEntry(now, response))
-      log.debug(s"Cached response (TTL=${ttl}ms): $cacheKey")
+      log.debug(s"Cache: STORE: $cacheKey")
     }
   }
 

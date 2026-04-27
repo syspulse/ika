@@ -33,7 +33,7 @@ class ProcessorPipeline(
    * Records metrics to telemetry.
    */
   def process(session: Session): Future[Session] = {
-    log.debug(s"Starting pipeline with ${processors.size} processors")
+    log.trace(s"Start: ${processors}")
 
     val sessionWithTelemetry = telemetry match {
       case Some(t) => session.putData("telemetry", t)
@@ -60,7 +60,7 @@ class ProcessorPipeline(
       }
 
     start.map { finalSession =>
-      log.debug(s"Pipeline completed. Rejected: ${finalSession.isRejected}, Duration: ${finalSession.durationMs}ms")
+      log.trace(s"Completed: ${finalSession}: ${finalSession.durationMs}ms")
       telemetry.foreach { t =>
         if (finalSession.isRejected) t.incRejections() else t.incResponses()
         t.recordRequestTime(finalSession.durationMs)

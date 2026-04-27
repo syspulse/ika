@@ -164,7 +164,7 @@ class PoolProcessor(
           .map(_.url)
 
         if (filtered.isEmpty) {
-          log.warn(s"No destinations found for pool: $pool. Using all destinations.")
+          log.warn(s"Destinations not found: $pool (Using all)")
           parsedDestinations.map(_.url)
         } else {
           filtered
@@ -183,7 +183,7 @@ class PoolProcessor(
     // Check if cache hit - skip load balancing if response already cached
     session.getData[Boolean]("fromCache") match {
       case Some(true) =>
-        log.debug("Response from cache, skipping load balancing")
+        log.debug("Response from cache: skipping load balancing")
         return Future.successful(session)
       case _ => // Continue
     }
@@ -192,7 +192,7 @@ class PoolProcessor(
     val availableDestinations = filterByPool(poolName)
 
     if (availableDestinations.isEmpty) {
-      log.error(s"No destinations available for pool: ${poolName.getOrElse("default")}")
+      log.error(s"Destinations unavailable: ${poolName.getOrElse("default")}")
       return Future.successful(
         session.reject(
           code = -32603,
@@ -225,9 +225,7 @@ class PoolProcessor(
 
     def attempt(idx: Int, start: Int): Future[Session] = {
       val dest = availableDestinations(idx)
-      log.info(
-        s"Selected destination: $dest (pool: ${poolName.getOrElse("default")}, strategy: ${strategy.strategyName})"
-      )
+      log.debug(s"Destination(${poolName.getOrElse("default")}/${strategy.strategyName}): '$dest'")
 
       val attemptSession = resetForAttempt(session.putData("destination", dest))
 

@@ -30,16 +30,13 @@ class ProxyStorePipeline(
 )(implicit ec: ExecutionContext) extends ProxyStore {
 
   private val log = Logger(s"${this}")
-
-  log.info(s"ProxyStorePipeline initialized with profile: $profile")
-  log.info(s"Pipeline: ${pipeline}")
+  
+  log.info(s"Pipeline: ${profile}: ${pipeline}")
 
   /**
    * process request
    */
   def proxy(method: HttpMethod, uriSuffix: String, req: ByteString, headers: Seq[HttpHeader]): Future[Session] = {
-    log.debug(s"Processing request: ${req.take(100).size} bytes...")
-
     // Create initial session
     val session = Session(
       requestBody = req,
@@ -50,10 +47,10 @@ class ProxyStorePipeline(
     // Execute pipeline
     pipeline.process(session).map { resultSession =>
       val cacheHit = resultSession.getData[Boolean]("cacheHit").getOrElse(false)
-      log.debug(s"Request completed. Source: ${resultSession.responseSource}, Cache hit: ${cacheHit}, Rejected: ${resultSession.isRejected}, Duration: ${resultSession.durationMs}ms")
+      log.debug(s"Pipeline: ${profile}: Data=${resultSession.responseBody.map(_.size).getOrElse(0)}, Cache=${cacheHit}, Rejected=${resultSession.isRejected}, Duration=${resultSession.durationMs}ms")
       resultSession
     }.recover { case ex: Exception =>
-      log.error(s"Pipeline execution failed: ${ex.getMessage}", ex)
+      log.error(s"Pipeline execution failed", ex)
       Session(requestBody = req, requestHeaders = headers)
         .reject(code = -32603, message = s"Pipeline error: ${ex.getMessage}", processorName = "ProxyStorePipeline")
         .withResponse(ByteString(s"""{"jsonrpc": "2.0", "error": {"code": -32603, "message": "Pipeline error: ${ex.getMessage}"}, "id": null}"""))

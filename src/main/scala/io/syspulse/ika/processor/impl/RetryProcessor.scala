@@ -62,7 +62,7 @@ class RetryProcessor(
     val maxRetry = session.getData[Int]("maxRetry").getOrElse(maxRetries)
     val retryDelay = session.getData[Long]("retryDelayMs").getOrElse(delayMs)
 
-    log.debug(s"Attempting request (retry ${retry}/${maxRetry})")
+    log.debug(s"Attempt: ${retry}/${maxRetry}")
 
     val attemptSession = session
       .withCursor(baseCursor) // reset so next() starts from downstream again
@@ -75,7 +75,7 @@ class RetryProcessor(
             .putData("retry", retry + 1)
             .putData("errorReason", s"${ex.getClass.getSimpleName}: ${ex.getMessage}")
 
-          log.warn(s"Request failed (retry ${retry}/${maxRetry}): ${ex.getMessage}. Retrying after ${retryDelay}ms...")
+          log.warn(s"Failed: retry=${retry}/${maxRetry}: ${ex.getMessage}. Retrying after ${retryDelay}...")
 
           // Use akka.pattern.after for async delay
           akka.pattern.after(
@@ -83,12 +83,12 @@ class RetryProcessor(
             scheduler
           )(attemptWithRetry(nextSession, baseCursor))
         } else {
-          log.error(s"Request failed after ${retry} retries: ${ex.getMessage}")
+          log.error(s"Failed: retry=${retry}/${maxRetry}: ${ex.getMessage}")
           // All retries exhausted - reject
           Future.successful(
             session.reject(
               code = -32603,
-              message = s"Request failed after ${maxRetry} retries",
+              message = s"Failed after: ${retry}/${maxRetry}",
               processorName = name,
               details = Some(ex.getMessage)
             )
@@ -106,7 +106,7 @@ class RetryProcessor(
           .putData("retry", resultRetry + 1)
           .copy(rejection = None) // Clear rejection for retry
 
-        log.warn(s"Request rejected (retry ${resultRetry}/${resultMaxRetry}): ${result.rejection}. Retrying after ${resultRetryDelay}ms...")
+        log.warn(s"Rejected (retry ${resultRetry}/${resultMaxRetry}): ${result.rejection}. Retrying after ${resultRetryDelay}ms...")
 
         akka.pattern.after(
           FiniteDuration(resultRetryDelay, TimeUnit.MILLISECONDS),

@@ -95,7 +95,7 @@ class CacheProcessor(
         processExpireMode(session)
 
       case _ =>
-        log.warn(s"Unknown cache mode: $mode, using passthrough")
+        log.warn(s"Unknown cache mode: '$mode' (using passthrough)")
         next(session)
     }
   }
@@ -129,12 +129,12 @@ class CacheProcessor(
         if (shouldCache(session, cacheKey)) {
           checkCache(session, cacheKey)
         } else {
-          log.debug(s"Skipping cache for: $cacheKey")
+          log.debug(s"Cache: SKIP: $cacheKey")
           Future.successful(session.putData("cacheKey", cacheKey))
         }
 
       case None =>
-        log.debug("Could not generate cache key")
+        log.debug(s"Could not generate cache key: ${session}")
         Future.successful(session)
     }
   }
@@ -142,8 +142,7 @@ class CacheProcessor(
   /**
    * Check cache for existing response
    */
-  protected def checkCache(session: Session, cacheKey: String): Future[Session] = {
-    log.debug(s"Checking cache for key: $cacheKey")
+  protected def checkCache(session: Session, cacheKey: String): Future[Session] = {    
 
     cache.get(cacheKey) match {
       case Some(entry) =>
@@ -153,7 +152,7 @@ class CacheProcessor(
         if (now - entry.ts < entryTTL) {
           // Cache hit - return early, skip remaining processors
           recordCacheHit(session)
-          log.info(s"Cache HIT: $cacheKey")
+          log.debug(s"Cache: HIT: $cacheKey")
 
           Future.successful(session
             .withResponse(entry.response, ResponseSource.CACHE)
@@ -166,7 +165,7 @@ class CacheProcessor(
           // Expired - remove and miss
           cache.remove(cacheKey)
           recordCacheMiss(session)
-          log.debug(s"Cache MISS (expired): $cacheKey")
+          log.debug(s"Cache: MISS (expired): $cacheKey")
 
           Future.successful(session.putData("cacheKey", cacheKey).putData("fromCache", false))
         }
@@ -174,7 +173,7 @@ class CacheProcessor(
       case None =>
         // Cache miss
         recordCacheMiss(session)
-        log.debug(s"Cache MISS: $cacheKey")
+        log.debug(s"Cache: MISS: $cacheKey")
 
         Future.successful(session.putData("cacheKey", cacheKey).putData("fromCache", false))
     }
@@ -187,7 +186,7 @@ class CacheProcessor(
     // Skip if response came from cache
     session.getData[Boolean]("fromCache") match {
       case Some(true) =>
-        log.debug("Response already from cache, skipping cache write")
+        log.debug("Cache: Response already from cache, skipping write")
         return Future.successful(session)
       case _ => // Continue
     }
@@ -198,12 +197,12 @@ class CacheProcessor(
         if (shouldCacheResponse(session, response)) {
           storeInCache(session, cacheKey, response)
         } else {
-          log.debug(s"Skipping cache for response: $cacheKey")
+          log.debug(s"Cache: SKIP: $cacheKey")
           Future.successful(session)
         }
 
       case None =>
-        log.debug("No cache key found, skipping cache write")
+        log.debug("Cache: No cache key found, skipping cache write")
         Future.successful(session)
     }
   }
@@ -214,7 +213,7 @@ class CacheProcessor(
   protected def storeInCache(session: Session, cacheKey: String, response: ByteString): Future[Session] = {
     val now = System.currentTimeMillis()
     cache.put(cacheKey, CacheEntry(now, response))
-    log.info(s"Caching response: $cacheKey")
+    log.info(s"Cache: STORE: $cacheKey")
     Future.successful(session)
   }
 

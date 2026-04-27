@@ -88,7 +88,7 @@ class HttpProcessor(
    * Decode compressed response
    */
   private def decodeResponse(response: HttpResponse): HttpResponse = {
-    log.debug(s"Response: status=${response.status}, encoding=${response.encoding}, contentLength=${response.entity.contentLengthOption}")
+    //log.debug(s"Response: status=${response.status}, encoding=${response.encoding}, contentLength=${response.entity.contentLengthOption}")
 
     val decoder = response.encoding match {
       case HttpEncodings.gzip =>
@@ -163,7 +163,8 @@ class HttpProcessor(
 
     val request = HttpRequest(method = method, uri = uri, headers = requestHeaders, entity = entity)
 
-    log.debug(s"HTTP ${method.value} request: ${uri}, headers=${requestHeaders}, body size=${body.size} bytes")
+    log.trace(s"Req(${method.value},${uri},headers=${requestHeaders},body[${body.size}]: '${body.utf8String}'")
+    log.info(s"Req(${method.value}:[${body.size}]) --> ${uri}")
 
     val httpF = Http()
       .singleRequest(request, settings = createPoolSettings(connectTimeoutMs))
@@ -171,7 +172,10 @@ class HttpProcessor(
       .flatMap { res =>
         val bodyFuture = res.entity.dataBytes.runReduce(_ ++ _)
         bodyFuture.map { data =>
-          log.debug(s"Response: status=${res.status}, body size=${data.size} bytes")
+          
+          log.trace(s"Rsp(${uri}): ${res.status}, headers[${res.headers.size}]=${res.headers}, body[${data.size}]='${data.utf8String}'")
+          log.debug(s"Req(${method.value}:[${body.size}],${uri}) <- Rsp(${res.status}:[${data.size}],${res.encoding.value})")
+          
           UpstreamResponse(
             status = res.status,
             headers = res.headers,
@@ -249,9 +253,6 @@ class HttpProcessor(
           }
           .getOrElse(ContentTypes.`application/json`)
         
-        log.debug(s"${sessionWithHeaders} --> ${finalUri}")
-        log.info(s"${m.value}(${sessionWithHeaders.requestBody.size} bytes) --> ${finalUri}")
-
         // IMPORTANT: Use session.requestBody and session.requestHeaders
         // These can be modified by upstream processors before reaching HTTP
         makeRequest(m, finalUri, sessionWithHeaders.requestBody, sessionWithHeaders.requestHeaders, connectMs, responseMs, contentType)
