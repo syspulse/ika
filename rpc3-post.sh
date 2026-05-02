@@ -2,7 +2,7 @@
 
 SERVICE_URI=${SERVICE_URI:-http://localhost:8080/api/v1/ika}
 
-DATA_JSON=${1:-test/rpc3/REQ_latest.json}
+DATA_JSON=${1:-test/rpc3/evm/REQ_latest.json}
 BLOCK=${2:-latest}
 COUNT=${COUNT:-0}
 SLEEP=${SLEEP:-0}

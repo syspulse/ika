@@ -7,17 +7,20 @@ package io.syspulse.ika.processor.uri
  *
  * Formats:
  * - `none://` — no caching
- * - `expire://` — defaults (ttl 30000, gcFreq 10000)
- * - `expire://30000` — ttl
- * - `expire://30000,10000` — ttl and gcFreq
+ * - `cache://` — defaults (ttl 30000, gcFreq 10000)
+ * - `cache://30000` — ttl
+ * - `cache://30000,10000` — ttl and gcFreq
+ * - `cache_async://` — same cache strategy, but response writes are asynchronous
  * - `rpc3://` — RPC3 cache defaults (ttl 30000, ttlLatest 12000, gcFreq 10000)
  * - `rpc3://30000` — custom ttl
  * - `rpc3://30000,12000` — ttl and ttlLatest
  * - `rpc3://30000,12000,60000` — ttl, ttlLatest, gcFreq
- * - `expire://?ttl=30000&gc=10000` — ttl and gcFreq via query params
+ * - `cache://?ttl=30000&gc=10000` — ttl and gcFreq via query params
+ * - `cache_async://?ttl=30000&gc=10000` — async response writes via query params
  * - `rpc3://?ttl=30000&latest=12000&gc=10000` — RPC3 via query params
  *
- * Unknown schemes default to expire with defaults.
+ * `expire://` is accepted as a backward-compatible alias for `cache://`.
+ * Unknown schemes default to cache with defaults.
  */
 final class CacheURI(uri: String) extends URILike {
   private val fields: CacheURI.Fields = parse(uri.trim)
@@ -37,7 +40,7 @@ final class CacheURI(uri: String) extends URILike {
 
     val idx = url.indexOf(PREFIX_SEP)
     if (idx < 0) {
-      return CacheURI.Fields("expire", DEF_TTL, DEF_TTL_LATEST, DEF_GC, ops)
+      return CacheURI.Fields("cache", DEF_TTL, DEF_TTL_LATEST, DEF_GC, ops)
     }
 
     val scheme = url.substring(0, idx).toLowerCase
@@ -50,22 +53,23 @@ final class CacheURI(uri: String) extends URILike {
       case "none" =>
         CacheURI.Fields("none", DEF_TTL, DEF_TTL_LATEST, DEF_GC, ops)
 
-      case "expire" =>
+      case "cache" | "cache_async" | "expire" =>
+        val kind = if (scheme == "cache_async") "cache_async" else "cache"
         val ttl0 = ops.get("ttl").orElse(ops.get("t")).map(parseLong(_, DEF_TTL))
         val gc0 = ops.get("gc").orElse(ops.get("g")).orElse(ops.get("gcFreq")).map(parseLong(_, DEF_GC))
 
         if (ttl0.isDefined || gc0.isDefined) {
-          CacheURI.Fields("expire", ttl0.getOrElse(DEF_TTL), DEF_TTL_LATEST, gc0.getOrElse(DEF_GC), ops)
+          CacheURI.Fields(kind, ttl0.getOrElse(DEF_TTL), DEF_TTL_LATEST, gc0.getOrElse(DEF_GC), ops)
         } else if (body.isEmpty) {
-          CacheURI.Fields("expire", DEF_TTL, DEF_TTL_LATEST, DEF_GC, ops)
+          CacheURI.Fields(kind, DEF_TTL, DEF_TTL_LATEST, DEF_GC, ops)
         } else {
           commaParts(body) match {
             case ttl :: Nil =>
-              CacheURI.Fields("expire", parseLong(ttl, DEF_TTL), DEF_TTL_LATEST, DEF_GC, ops)
+              CacheURI.Fields(kind, parseLong(ttl, DEF_TTL), DEF_TTL_LATEST, DEF_GC, ops)
             case ttl :: gc :: _ =>
-              CacheURI.Fields("expire", parseLong(ttl, DEF_TTL), DEF_TTL_LATEST, parseLong(gc, DEF_GC), ops)
+              CacheURI.Fields(kind, parseLong(ttl, DEF_TTL), DEF_TTL_LATEST, parseLong(gc, DEF_GC), ops)
             case _ =>
-              CacheURI.Fields("expire", DEF_TTL, DEF_TTL_LATEST, DEF_GC, ops)
+              CacheURI.Fields(kind, DEF_TTL, DEF_TTL_LATEST, DEF_GC, ops)
           }
         }
 
@@ -92,7 +96,7 @@ final class CacheURI(uri: String) extends URILike {
         }
       
       case _ =>
-        CacheURI.Fields("expire", DEF_TTL, DEF_TTL_LATEST, DEF_GC, ops)
+        CacheURI.Fields("cache", DEF_TTL, DEF_TTL_LATEST, DEF_GC, ops)
     }
   }
 }

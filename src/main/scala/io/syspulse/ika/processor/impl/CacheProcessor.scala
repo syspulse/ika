@@ -23,9 +23,10 @@ import io.syspulse.ika.processor.util.ProcessorConfigurable
  * This is a base processor that provides caching infrastructure. Subclasses can override
  * getCacheKey() and shouldCache() for protocol-specific caching logic.
  *
- * Modes:
+ * Strategies:
  * - "none" - No caching (passthrough)
- * - "expire" - Time-based expiration with configurable TTL
+ * - "cache" - Time-based expiration with configurable TTL
+ * - "cache_async" - Same cache lookups as "cache", but response cache writes happen asynchronously
  *
  * Features:
  * - Thread-safe concurrent cache
@@ -40,7 +41,7 @@ import io.syspulse.ika.processor.util.ProcessorConfigurable
  * - Writes: "cacheKey" (String) - the cache key used
  */
 class CacheProcessor(
-  mode: String = "expire",
+  strategy: String = "cache",
   ttl: Long = 30000L,
   gcFreq: Long = 10000L,
   skipCaching: Set[String] = Set.empty
@@ -54,8 +55,10 @@ class CacheProcessor(
   protected case class CacheEntry(ts: Long, response: ByteString)
   protected val cache: concurrent.Map[String, CacheEntry] = new ConcurrentHashMap[String, CacheEntry]().asScala
 
-  // Garbage collection cron job (only for expire mode)
-  private val cron: Option[CronFreq] = if (mode == "expire") {
+  private val effectiveStrategy: String = CacheProcessor.normalizeStrategy(strategy)
+
+  // Garbage collection cron job (only for cache strategies)
+  private val cron: Option[CronFreq] = if (effectiveStrategy == "cache" || effectiveStrategy == "cache_async") {
     Some(new CronFreq(
       (_: Long) => {
         val now = System.currentTimeMillis()
@@ -79,31 +82,34 @@ class CacheProcessor(
     None
   }
 
-  // Start GC if in expire mode
+  // Start GC if caching is enabled
   cron.foreach(_.start())
 
   /**
    * Process - handles both request (cache lookup) and response (cache store)
    */
   override def process(session: Session): Future[Session] = {
-    mode match {
+    effectiveStrategy match {
       case "none" =>
         // No caching - pass through
         next(session)
 
-      case "expire" =>
-        processExpireMode(session)
+      case "cache" =>
+        processCacheStrategy(session)
+
+      case "cache_async" =>
+        processCacheAsyncStrategy(session)
 
       case _ =>
-        log.warn(s"Unknown cache mode: '$mode' (using passthrough)")
+        log.warn(s"Unknown cache strategy: '$strategy' (using passthrough)")
         next(session)
     }
   }
 
   /**
-   * Process with expire mode - check cache on request, store on response
+   * Process with cache strategy - check cache on request, store on response.
    */
-  protected def processExpireMode(session: Session): Future[Session] = {
+  protected def processCacheStrategy(session: Session): Future[Session] = {
     // Request phase - check cache first
     handleRequestPhase(session).flatMap { s =>
       // If cache hit produced a response or early-return, stop here
@@ -118,6 +124,33 @@ class CacheProcessor(
         }
       }
     }
+  }
+
+  /**
+   * Process with async cache strategy - check cache on request, return remote response immediately,
+   * and do response validation/cache writes in the background.
+   */
+  protected def processCacheAsyncStrategy(session: Session): Future[Session] = {
+    handleRequestPhase(session).flatMap { s =>
+      if (s.responseBody.isDefined || s.shouldReturn || s.isRejected) Future.successful(s)
+      else {
+        next(s).map { down =>
+          down.responseBody.foreach { response =>
+            runResponseCacheAsync(down, response)
+          }
+          down
+        }
+      }
+    }
+  }
+
+  protected def runResponseCacheAsync(session: Session, response: ByteString): Unit = {
+    val _ = Future(handleResponsePhase(session, response))
+      .flatMap(identity)
+      .recover { case e =>
+        log.warn(s"Cache: async write failed: ${e.getMessage}")
+        session
+      }
   }
 
   /**
@@ -152,7 +185,7 @@ class CacheProcessor(
         if (now - entry.ts < entryTTL) {
           // Cache hit - return early, skip remaining processors
           recordCacheHit(session)
-          log.debug(s"Cache: HIT: $cacheKey")
+          log.info(s"Req([${session.requestBody.size}]) <-- Cache($cacheKey)")
 
           Future.successful(session
             .withResponse(entry.response, ResponseSource.CACHE)
@@ -272,27 +305,33 @@ class CacheProcessor(
   /**
    * Override toString for better logging
    */
-  override def toString: String = s"${name}($mode,${ttl},${gcFreq})"
+  override def toString: String = s"${name}($effectiveStrategy,${ttl},${gcFreq})"
 }
 
 object CacheProcessor extends ProcessorConfigurable {
+  def normalizeStrategy(strategy: String): String =
+    strategy.trim.toLowerCase match {
+      case "expire" => "cache"
+      case other    => other
+    }
+
   /**
    * Create a CacheProcessor with no caching (passthrough)
    */
   def none()(implicit ec: ExecutionContext): CacheProcessor = {
-    new CacheProcessor(mode = "none")
+    new CacheProcessor(strategy = "none")
   }
 
   /**
-   * Create a CacheProcessor with expire mode
+   * Create a CacheProcessor with cache strategy.
    */
-  def expire(
+  def cache(
     ttl: Long = 30000L,
     gcFreq: Long = 10000L,
     skipCaching: Set[String] = Set.empty
   )(implicit ec: ExecutionContext): CacheProcessor = {
     new CacheProcessor(
-      mode = "expire",
+      strategy = "cache",
       ttl = ttl,
       gcFreq = gcFreq,
       skipCaching = skipCaching
@@ -300,16 +339,42 @@ object CacheProcessor extends ProcessorConfigurable {
   }
 
   /**
-   * Build from [[CacheURI]] (`none` or `expire` only; for `rpc3` use [[io.syspulse.ika.processor.rpc3.CacheRpc3Processor.fromCacheUri]]).
+   * Create a CacheProcessor with async response cache writes.
+   */
+  def cacheAsync(
+    ttl: Long = 30000L,
+    gcFreq: Long = 10000L,
+    skipCaching: Set[String] = Set.empty
+  )(implicit ec: ExecutionContext): CacheProcessor = {
+    new CacheProcessor(
+      strategy = "cache_async",
+      ttl = ttl,
+      gcFreq = gcFreq,
+      skipCaching = skipCaching
+    )
+  }
+
+  /** Backward-compatible alias for old callers. */
+  def expire(
+    ttl: Long = 30000L,
+    gcFreq: Long = 10000L,
+    skipCaching: Set[String] = Set.empty
+  )(implicit ec: ExecutionContext): CacheProcessor =
+    cache(ttl = ttl, gcFreq = gcFreq, skipCaching = skipCaching)
+
+  /**
+   * Build from [[CacheURI]] (`none`, `cache`, or `cache_async`; for `rpc3` use [[io.syspulse.ika.processor.rpc3.Rpc3Processor.fromUri]]).
    */
   def fromUri(c: CacheURI, skipCaching: Set[String] = Set.empty)(implicit ec: ExecutionContext): CacheProcessor = {
     c.kind match {
       case "none" =>
         none()
-      case "expire" =>
-        expire(ttl = c.ttl, gcFreq = c.gcFreq, skipCaching = skipCaching)
+      case "cache" =>
+        cache(ttl = c.ttl, gcFreq = c.gcFreq, skipCaching = skipCaching)
+      case "cache_async" =>
+        cacheAsync(ttl = c.ttl, gcFreq = c.gcFreq, skipCaching = skipCaching)
       case _ =>
-        expire()
+        cache()
     }
   }
 
@@ -319,7 +384,7 @@ object CacheProcessor extends ProcessorConfigurable {
     CacheProcessor.fromUri(c)
 
   override def fromConfig(id: String, cfg: TypesafeConfig)(implicit ec: ExecutionContext, actorSystem: ActorSystem): Seq[Processor] = {
-    val rawBase = if (cfg.hasPath("strategy")) cfg.getString("strategy") else "expire://"
+    val rawBase = if (cfg.hasPath("strategy")) cfg.getString("strategy") else "cache://"
     val base = if (rawBase.contains("://")) rawBase else s"${rawBase}://"
     val ttl = if (cfg.hasPath("ttl")) Some(cfg.getLong("ttl")) else None
     val gc = if (cfg.hasPath("gc")) Some(cfg.getLong("gc"))

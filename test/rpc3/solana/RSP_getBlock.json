@@ -1,0 +1,1 @@
+{"jsonrpc":"2.0","result":{"blockHeight":123456000,"blockTime":1234567890,"blockhash":"ABC123DEF456","parentSlot":123456788,"previousBlockhash":"XYZ789","transactions":[]},"id":123456789}

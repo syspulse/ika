@@ -39,9 +39,12 @@ profiles {
 
 Running with profile:
 
+Proxy Profile:
 ```
 ./run-ika.sh --profile proxy
 ```
+
+
 
 ### Run via pipeline
 

@@ -6,17 +6,21 @@ import scala.concurrent.{Future, ExecutionContext, Await}
 import scala.concurrent.duration._
 import java.nio.file.Paths
 import scala.io.Source
+import com.typesafe.config.ConfigFactory
 
 import io.syspulse.ika.processor.Session
 import io.syspulse.ika.telemetry.Telemetry
 import io.syspulse.ika.processor.ai.AIRouterProcessor
 import io.syspulse.ika.processor.ai.AITokensProcessor
+import akka.actor.ActorSystem
 import akka.http.scaladsl.model.HttpHeader
 import akka.util.ByteString
+import spray.json._
 
 class AIProcessorsSpec extends AnyWordSpec with Matchers {
 
   implicit val ec: ExecutionContext = ExecutionContext.global
+  implicit val actorSystem: ActorSystem = ActorSystem("ai-processors-spec")
   private val providers = Map(
     "openai" -> "https://api.openai.com",
     "anthropic" -> "https://api.anthropic.com"
@@ -36,9 +40,11 @@ class AIProcessorsSpec extends AnyWordSpec with Matchers {
 
       result.isRejected shouldBe false
       result.getData[String]("model") shouldBe Some("openai/gpt-4o-mini")
+      result.getData[String]("modelUpstream") shouldBe Some("gpt-4o-mini")
       result.getData[String]("provider") shouldBe Some("openai")
       result.getData[String]("pool") shouldBe Some("openai")
       result.getData[String]("destination") shouldBe Some("https://api.openai.com")
+      result.requestBody.utf8String.parseJson.asJsObject.fields("model") shouldBe JsString("gpt-4o-mini")
     }
 
     "route fixture request (suffix appended later by HttpProcessor)" in {
@@ -50,10 +56,12 @@ class AIProcessorsSpec extends AnyWordSpec with Matchers {
 
       result.isRejected shouldBe false
       result.getData[String]("model") shouldBe Some("openai/gpt-4o-mini")
+      result.getData[String]("modelUpstream") shouldBe Some("gpt-4o-mini")
       result.getData[String]("provider") shouldBe Some("openai")
       result.getData[String]("pool") shouldBe Some("openai")
       result.getData[String]("destination") shouldBe Some("https://api.openai.com")
       result.getData[Boolean]("http.destinationHasSuffix") shouldBe None
+      result.requestBody.utf8String.parseJson.asJsObject.fields("model") shouldBe JsString("gpt-4o-mini")
     }
 
     "inject provider API key header (fixture request)" in {
@@ -73,6 +81,49 @@ class AIProcessorsSpec extends AnyWordSpec with Matchers {
       hs.exists(h => h.lowercaseName() == "authorization" && h.value() == "Bearer sk-test") shouldBe true
     }
 
+    "inject provider custom headers" in {
+      val processor = new AIRouterProcessor(
+        providerUris = providers,
+        providerHeaders = Map("anthropic" -> Map("anthropic-version" -> "2023-06-01"))
+      )
+
+      val request = """{"model": "anthropic/claude-3-haiku", "messages": []}"""
+      val session = Session(requestBody = ByteString(request))
+
+      val result = Await.result(processor.process(session), 5.seconds)
+
+      result.isRejected shouldBe false
+      val hs: Seq[HttpHeader] = result.requestHeaders
+      hs.exists(h => h.lowercaseName() == "anthropic-version" && h.value() == "2023-06-01") shouldBe true
+    }
+
+    "parse provider custom headers from config" in {
+      val cfg = ConfigFactory.parseString("""
+        type = "ai_router://"
+        providers {
+          claude {
+            uri = "https://api.anthropic.com"
+            api_key = "sk-ant-test"
+            api_key_header_name = "x-api-key"
+            api_key_header_value = "%s"
+            headers {
+              "anthropic-version" = "2023-06-01"
+            }
+          }
+        }
+      """)
+      val processor = AIRouterProcessor.fromConfig("ai_router_test", cfg).head
+      val request = """{"model": "claude/claude-3-haiku", "messages": []}"""
+      val session = Session(requestBody = ByteString(request))
+
+      val result = Await.result(processor.process(session), 5.seconds)
+
+      result.isRejected shouldBe false
+      val hs: Seq[HttpHeader] = result.requestHeaders
+      hs.exists(h => h.lowercaseName() == "x-api-key" && h.value() == "sk-ant-test") shouldBe true
+      hs.exists(h => h.lowercaseName() == "anthropic-version" && h.value() == "2023-06-01") shouldBe true
+    }
+
     "extract model without provider prefix and use default" in {
       val processor = AIRouterProcessor(providers)
       val request = """{"model": "gpt-4", "messages": []}"""
@@ -82,9 +133,11 @@ class AIProcessorsSpec extends AnyWordSpec with Matchers {
 
       result.isRejected shouldBe false
       result.getData[String]("model") shouldBe Some("gpt-4")
+      result.getData[String]("modelUpstream") shouldBe Some("gpt-4")
       result.getData[String]("provider") shouldBe Some("openai")  // default provider
       result.getData[String]("pool") shouldBe Some("openai")
       result.getData[String]("destination") shouldBe Some("https://api.openai.com")
+      result.requestBody.utf8String.parseJson.asJsObject.fields("model") shouldBe JsString("gpt-4")
     }
 
     "extract model with custom provider" in {
@@ -96,9 +149,11 @@ class AIProcessorsSpec extends AnyWordSpec with Matchers {
 
       result.isRejected shouldBe false
       result.getData[String]("model") shouldBe Some("anthropic/claude-3-opus")
+      result.getData[String]("modelUpstream") shouldBe Some("claude-3-opus")
       result.getData[String]("provider") shouldBe Some("anthropic")
       result.getData[String]("pool") shouldBe Some("anthropic")
       result.getData[String]("destination") shouldBe Some("https://api.anthropic.com")
+      result.requestBody.utf8String.parseJson.asJsObject.fields("model") shouldBe JsString("claude-3-opus")
     }
 
     "use custom model-to-pool mapping" in {
@@ -113,9 +168,11 @@ class AIProcessorsSpec extends AnyWordSpec with Matchers {
 
       result.isRejected shouldBe false
       result.getData[String]("model") shouldBe Some("gpt-4-custom")
+      result.getData[String]("modelUpstream") shouldBe Some("gpt-4-custom")
       result.getData[String]("provider") shouldBe Some("claude")
       result.getData[String]("pool") shouldBe Some("claude")
       result.getData[String]("destination") shouldBe Some("https://api.claude.com")
+      result.requestBody.utf8String.parseJson.asJsObject.fields("model") shouldBe JsString("gpt-4-custom")
     }
 
     "reject request without model field" in {
@@ -156,6 +213,142 @@ class AIProcessorsSpec extends AnyWordSpec with Matchers {
   }
 
   "AITokensProcessor" should {
+    "extract and strip metadata from request payload" in {
+      val processor = new AITokensProcessor()
+      val request =
+        """{
+          |  "metadata": { "pid": 7, "tid": 9, "customer_id": "c-1" },
+          |  "model": "openai/gpt-4o-mini",
+          |  "messages": []
+          |}""".stripMargin
+      val session = Session(requestBody = ByteString(request))
+
+      val result = Await.result(processor.processRequest(session), 5.seconds)
+
+      result.getData[Int]("pid") shouldBe Some(7)
+      result.getData[Int]("tid") shouldBe Some(9)
+      result.getData[String]("customer_id") shouldBe Some("c-1")
+
+      val bodyObj = result.requestBody.utf8String.parseJson.asJsObject
+      bodyObj.fields.contains("metadata") shouldBe false
+    }
+
+    "write telemetry attribute object based on metadata and token usage" in {
+      val telemetry = Telemetry()
+      val tokens = new AITokensProcessor(metadataUsageAttr = Some("{tid}-{pid}-{customer_id}"))
+      val router = AIRouterProcessor(providers)
+
+      val request =
+        """{
+          |  "metadata": { "pid": 7, "tid": 9, "customer_id": "c-1" },
+          |  "model": "openai/gpt-4o-mini",
+          |  "messages": []
+          |}""".stripMargin
+
+      val s0 = Session(requestBody = ByteString(request)).putData("telemetry", telemetry)
+      val s1 = Await.result(tokens.processRequest(s0), 5.seconds)
+      val s2 = Await.result(router.processRequest(s1), 5.seconds)
+
+      val response = """{
+        "usage": {
+          "prompt_tokens": 11,
+          "completion_tokens": 22,
+          "total_tokens": 33
+        }
+      }"""
+
+      Await.result(tokens.processResponse(s2.copy(responseBody = Some(ByteString(response)))), 5.seconds)
+
+      telemetry.getAttr("9-7-c-1") shouldBe Some(
+        JsObject(
+          "openai" -> JsObject(
+            "openai/gpt-4o-mini" -> JsObject(
+              "input_tokens" -> JsNumber(11),
+              "output_tokens" -> JsNumber(22)
+            )
+          )
+        )
+      )
+    }
+
+    "accumulate telemetry attribute object across multiple requests" in {
+      val telemetry = Telemetry()
+      val tokens = new AITokensProcessor(metadataUsageAttr = Some("{tid}-{pid}-{customer_id}"))
+      val router = AIRouterProcessor(providers)
+
+      val request =
+        """{
+          |  "metadata": { "pid": 13, "tid": 400, "customer_id": "customer-1" },
+          |  "model": "claude/claude-haiku-4-5-20251001",
+          |  "messages": []
+          |}""".stripMargin
+
+      val base = Session(requestBody = ByteString(request)).putData("telemetry", telemetry)
+      val s1 = Await.result(tokens.processRequest(base), 5.seconds)
+      val s2 = Await.result(router.processRequest(s1), 5.seconds)
+
+      val rsp1 = """{ "usage": { "input_tokens": 12, "output_tokens": 45 } }"""
+      val rsp2 = """{ "usage": { "input_tokens": 3, "output_tokens": 5 } }"""
+
+      Await.result(tokens.processResponse(s2.copy(responseBody = Some(ByteString(rsp1)))), 5.seconds)
+      Await.result(tokens.processResponse(s2.copy(responseBody = Some(ByteString(rsp2)))), 5.seconds)
+
+      telemetry.getAttr("400-13-customer-1") shouldBe Some(
+        JsObject(
+          "claude" -> JsObject(
+            "claude/claude-haiku-4-5-20251001" -> JsObject(
+              "input_tokens" -> JsNumber(15),
+              "output_tokens" -> JsNumber(50)
+            )
+          )
+        )
+      )
+    }
+
+    "accumulate telemetry attribute object separately per provider/model under same metadata key" in {
+      val telemetry = Telemetry()
+      val tokens = new AITokensProcessor(metadataUsageAttr = Some("{tid}-{pid}-{customer_id}"))
+
+      val request =
+        """{
+          |  "metadata": { "pid": 13, "tid": 400, "customer_id": "customer-1" },
+          |  "model": "claude/claude-haiku-4-5-20251001",
+          |  "messages": []
+          |}""".stripMargin
+
+      // First: claude
+      val s0 = Session(requestBody = ByteString(request)).putData("telemetry", telemetry)
+      val s1 = Await.result(tokens.processRequest(s0), 5.seconds)
+        .putData("provider", "claude")
+        .putData("model", "claude/claude-haiku-4-5-20251001")
+
+      Await.result(tokens.processResponse(s1.copy(responseBody = Some(ByteString("""{ "usage": { "input_tokens": 12, "output_tokens": 51 } }""")))), 5.seconds)
+
+      // Second: openai, same metadata key
+      val s2 = s1
+        .putData("provider", "openai")
+        .putData("model", "openai/gpt-4o-mini")
+
+      Await.result(tokens.processResponse(s2.copy(responseBody = Some(ByteString("""{ "usage": { "input_tokens": 36, "output_tokens": 115 } }""")))), 5.seconds)
+
+      telemetry.getAttr("400-13-customer-1") shouldBe Some(
+        JsObject(
+          "claude" -> JsObject(
+            "claude/claude-haiku-4-5-20251001" -> JsObject(
+              "input_tokens" -> JsNumber(12),
+              "output_tokens" -> JsNumber(51)
+            )
+          ),
+          "openai" -> JsObject(
+            "openai/gpt-4o-mini" -> JsObject(
+              "input_tokens" -> JsNumber(36),
+              "output_tokens" -> JsNumber(115)
+            )
+          )
+        )
+      )
+    }
+
     "extract token usage from response" in {
       val processor = AITokensProcessor()
       val response = """{
@@ -177,20 +370,67 @@ class AIProcessorsSpec extends AnyWordSpec with Matchers {
       result.getData[Int]("totalTokens") shouldBe Some(30)
     }
 
+    "extract token usage from Anthropic/Claude response format" in {
+      val processor = AITokensProcessor()
+      val response = """{
+        "type": "message",
+        "usage": {
+          "input_tokens": 12,
+          "output_tokens": 49
+        }
+      }"""
+      val session = Session(requestBody = ByteString("test"), responseBody = Some(ByteString(response)))
+
+      val result = Await.result(processor.process(session), 5.seconds)
+
+      result.isRejected shouldBe false
+      result.getData[Int]("promptTokens") shouldBe Some(12)
+      result.getData[Int]("completionTokens") shouldBe Some(49)
+      result.getData[Int]("totalTokens") shouldBe Some(61)
+    }
+
+    "extract token usage from OpenAI Responses format" in {
+      val processor = AITokensProcessor()
+      val response = """{
+        "object": "response",
+        "usage": {
+          "input_tokens": 12,
+          "output_tokens": 19,
+          "total_tokens": 31
+        }
+      }"""
+      val session = Session(requestBody = ByteString("test"), responseBody = Some(ByteString(response)))
+
+      val result = Await.result(processor.process(session), 5.seconds)
+
+      result.isRejected shouldBe false
+      result.getData[Int]("promptTokens") shouldBe Some(12)
+      result.getData[Int]("completionTokens") shouldBe Some(19)
+      result.getData[Int]("totalTokens") shouldBe Some(31)
+    }
+
     "add token usage to telemetry" in {
       val telemetry = Telemetry()
       val processor = AITokensProcessor()
       val response = """{
         "usage": {
+          "input_tokens": 50,
+          "output_tokens": 0,
           "total_tokens": 50
         }
       }"""
       val session = Session(requestBody = ByteString("test"), responseBody = Some(ByteString(response)))
         .putData("telemetry", telemetry)
+        .putData("provider", "openai")
+        .putData("model", "openai/gpt-4o-mini")
 
       Await.result(processor.process(session), 5.seconds)
 
-      telemetry.getCounter("ai.tokens.total") shouldBe 50
+      telemetry.getAiTokens
+        .get("openai")
+        .flatMap(_.get("openai/gpt-4o-mini"))
+        .map { case (inTok, outTok) => inTok + outTok }
+        .getOrElse(0L) shouldBe 50L
     }
 
     "handle response without usage field gracefully" in {

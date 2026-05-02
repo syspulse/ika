@@ -170,11 +170,11 @@ class HttpProcessor(
       .singleRequest(request, settings = createPoolSettings(connectTimeoutMs))
       .map(decodeResponse)
       .flatMap { res =>
-        val bodyFuture = res.entity.dataBytes.runReduce(_ ++ _)
+        val bodyFuture = res.entity.dataBytes.runFold(ByteString.empty)(_ ++ _)
         bodyFuture.map { data =>
-          
+
           log.trace(s"Rsp(${uri}): ${res.status}, headers[${res.headers.size}]=${res.headers}, body[${data.size}]='${data.utf8String}'")
-          log.debug(s"Req(${method.value}:[${body.size}],${uri}) <- Rsp(${res.status}:[${data.size}],${res.encoding.value})")
+          log.info(s"Req(${method.value}:[${body.size}]) <-- Rsp(${uri},${res.status}:[${data.size}],${res.encoding.value})")
           
           UpstreamResponse(
             status = res.status,
