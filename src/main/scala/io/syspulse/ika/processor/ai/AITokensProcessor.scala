@@ -116,13 +116,22 @@ class AITokensProcessor(
         .foldLeft(acc) { (s, dataStr) =>
           try {
             val json = dataStr.parseJson.asJsObject
-            json.fields.get("usage") match {
-              case Some(usageObj: JsObject) =>
+            // Locate usage regardless of API variant:
+            //   Chat Completions: top-level "usage" field
+            //   Responses API:    "response.usage" inside a "response.completed" event
+            val usageOpt: Option[JsObject] =
+              json.fields.get("usage").collect { case o: JsObject => o }
+                .orElse(
+                  json.fields.get("response").collect { case o: JsObject => o }
+                    .flatMap(_.fields.get("usage").collect { case o: JsObject => o })
+                )
+            usageOpt match {
+              case Some(usageObj) =>
                 val pt = extractIntField(usageObj, "prompt_tokens").orElse(extractIntField(usageObj, "input_tokens")).getOrElse(s.promptTokens)
                 val ct = extractIntField(usageObj, "completion_tokens").orElse(extractIntField(usageObj, "output_tokens")).getOrElse(s.completionTokens)
                 val tt = extractIntField(usageObj, "total_tokens").getOrElse(pt + ct)
                 s.copy(promptTokens = pt, completionTokens = ct, totalTokens = tt)
-              case _ => s
+              case None => s
             }
           } catch { case _: Exception => s }
         }
