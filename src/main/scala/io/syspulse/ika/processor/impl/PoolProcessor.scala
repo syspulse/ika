@@ -215,6 +215,7 @@ class PoolProcessor(
           state = io.syspulse.ika.processor.SessionState.CONTINUE,
           rejection = None,
           responseBody = None,
+          responseStream = None,
           responseHeaderMap = Map.empty,
           responseSource = io.syspulse.ika.processor.ResponseSource.LOCAL
         )

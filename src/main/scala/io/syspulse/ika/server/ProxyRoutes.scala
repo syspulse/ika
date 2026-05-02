@@ -57,6 +57,7 @@ import io.syspulse.ika.store.ProxyRegistry._
 import io.syspulse.ika.server._
 import io.syspulse.skel.service.telemetry.TelemetryRegistry
 import akka.http.scaladsl.server.AuthorizationFailedRejection
+import akka.stream.scaladsl.Source
 
 @Path("/")
 class ProxyRoutes(registry: ActorRef[Command])(implicit context: ActorContext[_],config:Config) extends CommonRoutes with Routeable {
@@ -104,7 +105,6 @@ class ProxyRoutes(registry: ActorRef[Command])(implicit context: ActorContext[_]
         }
         rsp match {
           case Success(sess) =>
-            val body = sess.responseBody.getOrElse(akka.util.ByteString.empty)
             // Drop hop-by-hop headers that must not be forwarded by proxies
             val hopByHop = Set(
               "connection",
@@ -117,13 +117,25 @@ class ProxyRoutes(registry: ActorRef[Command])(implicit context: ActorContext[_]
               "upgrade"
             )
             val filtered = sess.responseHeaders.filterNot(h => hopByHop.contains(h.lowercaseName()))
-            complete(
-              HttpResponse(
-                status = sess.responseStatus,
-                headers = filtered.toList,
-                entity = HttpEntity(sess.responseContentType, body)
+            if (sess.isStreaming) {
+              val stream = sess.responseStream.getOrElse(Source.empty[akka.util.ByteString])
+              complete(
+                HttpResponse(
+                  status = sess.responseStatus,
+                  headers = filtered.toList,
+                  entity = HttpEntity.Chunked.fromData(sess.responseContentType, stream)
+                )
               )
-            )
+            } else {
+              val body = sess.responseBody.getOrElse(akka.util.ByteString.empty)
+              complete(
+                HttpResponse(
+                  status = sess.responseStatus,
+                  headers = filtered.toList,
+                  entity = HttpEntity(sess.responseContentType, body)
+                )
+              )
+            }
           case Failure(e) =>
             complete(
               HttpResponse(

@@ -66,7 +66,8 @@ class HttpProcessor(
     status: StatusCode,
     headers: Seq[HttpHeader],
     body: ByteString,
-    contentType: ContentType
+    contentType: ContentType,
+    stream: Option[akka.stream.scaladsl.Source[ByteString, Any]] = None
   )
 
   /**
@@ -170,18 +171,30 @@ class HttpProcessor(
       .singleRequest(request, settings = createPoolSettings(connectTimeoutMs))
       .map(decodeResponse)
       .flatMap { res =>
-        val bodyFuture = res.entity.dataBytes.runFold(ByteString.empty)(_ ++ _)
-        bodyFuture.map { data =>
+        val ct = res.entity.contentType
+        val isSSE = ct.mediaType.subType.equalsIgnoreCase("event-stream")
 
-          log.trace(s"Rsp(${uri}): ${res.status}, headers[${res.headers.size}]=${res.headers}, body[${data.size}]='${data.utf8String}'")
-          log.info(s"Req(${method.value}:[${body.size}]) <-- Rsp(${uri},${res.status}:[${data.size}],${res.encoding.value})")
-          
-          UpstreamResponse(
+        if (isSSE) {
+          log.info(s"Req(${method.value}:[${body.size}]) <-- SSE stream(${uri},${res.status})")
+          Future.successful(UpstreamResponse(
             status = res.status,
             headers = res.headers,
-            body = data,
-            contentType = res.entity.contentType
-          )
+            body = ByteString.empty,
+            contentType = ct,
+            stream = Some(res.entity.dataBytes)
+          ))
+        } else {
+          val bodyFuture = res.entity.dataBytes.runFold(ByteString.empty)(_ ++ _)
+          bodyFuture.map { data =>
+            log.trace(s"Rsp(${uri}): ${res.status}, headers[${res.headers.size}]=${res.headers}, body[${data.size}]='${data.utf8String}'")
+            log.info(s"Req(${method.value}:[${body.size}]) <-- Rsp(${uri},${res.status}:[${data.size}],${res.encoding.value})")
+            UpstreamResponse(
+              status = res.status,
+              headers = res.headers,
+              body = data,
+              contentType = ct
+            )
+          }
         }
       }
       .recoverWith {
@@ -257,13 +270,24 @@ class HttpProcessor(
         // These can be modified by upstream processors before reaching HTTP
         makeRequest(m, finalUri, sessionWithHeaders.requestBody, sessionWithHeaders.requestHeaders, connectMs, responseMs, contentType)
           .map { rsp =>
-            val s1 = sessionWithHeaders.withResponse(
-              body = rsp.body,
-              source = ResponseSource.REMOTE,
-              status = rsp.status,
-              headers = rsp.headers,
-              contentType = rsp.contentType
-            )
+            val s1 = rsp.stream match {
+              case Some(src) =>
+                sessionWithHeaders.withResponseStream(
+                  stream = src,
+                  source = ResponseSource.REMOTE,
+                  status = rsp.status,
+                  headers = rsp.headers,
+                  contentType = rsp.contentType
+                )
+              case None =>
+                sessionWithHeaders.withResponse(
+                  body = rsp.body,
+                  source = ResponseSource.REMOTE,
+                  status = rsp.status,
+                  headers = rsp.headers,
+                  contentType = rsp.contentType
+                )
+            }
             // Signal retry processor that some HTTP statuses should be retried (without failing the Future).
             // This keeps default behavior "return exactly what upstream returned" if retries are exhausted.
             if (rsp.status.intValue() >= 500) s1.putData("http.retryable", true)

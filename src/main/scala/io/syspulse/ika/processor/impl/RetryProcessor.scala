@@ -104,7 +104,7 @@ class RetryProcessor(
       if (result.isRejected && resultRetry < resultMaxRetry) {
         val nextSession = result
           .putData("retry", resultRetry + 1)
-          .copy(rejection = None) // Clear rejection for retry
+          .copy(rejection = None, responseStream = None) // Clear rejection and stream for retry
 
         log.warn(s"Rejected (retry ${resultRetry}/${resultMaxRetry}): ${result.rejection}. Retrying after ${resultRetryDelay}ms...")
 
@@ -117,6 +117,7 @@ class RetryProcessor(
         // Clear response so downstream processors re-run and HttpProcessor will be invoked again.
         val cleared = result.copy(
           responseBody = None,
+          responseStream = None,
           responseHeaderMap = Map.empty,
           responseStatus = StatusCodes.OK,
           responseContentType = ContentTypes.`application/json`

@@ -4,6 +4,9 @@ import scala.concurrent.{Future, ExecutionContext}
 import com.typesafe.scalalogging.Logger
 import spray.json._
 
+import akka.stream.scaladsl.{Sink, Keep, Source => AkkaSource}
+import akka.util.ByteString
+
 import io.syspulse.ika.processor.{BidirectionalProcessor, Session, Processor}
 import io.syspulse.ika.telemetry.Telemetry
 import io.syspulse.ika.processor.util.ProcessorConfigurable
@@ -95,10 +98,79 @@ class AITokensProcessor(
       json.fields.get("object").contains(JsString("error"))
   }
 
+  // SSE state accumulated per stream chunk
+  private case class SseState(buffer: String, promptTokens: Int, completionTokens: Int, totalTokens: Int)
+
+  private def parseSseChunk(state: SseState, chunk: ByteString): SseState = {
+    val combined = state.buffer + chunk.utf8String
+    val events = combined.split("\n\n")
+    // Last element may be incomplete — keep it in the buffer
+    val complete = if (combined.endsWith("\n\n")) events else events.dropRight(1)
+    val remaining = if (combined.endsWith("\n\n")) "" else events.lastOption.getOrElse("")
+
+    complete.foldLeft(state.copy(buffer = remaining)) { (acc, event) =>
+      event.linesIterator
+        .filter(_.startsWith("data:"))
+        .map(_.stripPrefix("data:").trim)
+        .filterNot(_ == "[DONE]")
+        .foldLeft(acc) { (s, dataStr) =>
+          try {
+            val json = dataStr.parseJson.asJsObject
+            json.fields.get("usage") match {
+              case Some(usageObj: JsObject) =>
+                val pt = extractIntField(usageObj, "prompt_tokens").orElse(extractIntField(usageObj, "input_tokens")).getOrElse(s.promptTokens)
+                val ct = extractIntField(usageObj, "completion_tokens").orElse(extractIntField(usageObj, "output_tokens")).getOrElse(s.completionTokens)
+                val tt = extractIntField(usageObj, "total_tokens").getOrElse(pt + ct)
+                s.copy(promptTokens = pt, completionTokens = ct, totalTokens = tt)
+              case _ => s
+            }
+          } catch { case _: Exception => s }
+        }
+    }
+  }
+
+  private def reportSseTokens(state: SseState, session: Session): Unit = {
+    if (state.promptTokens == 0 && state.completionTokens == 0) return
+    session.getData[Telemetry]("telemetry").foreach { telemetry =>
+      val provider = session.getData[String]("provider").getOrElse("openai")
+      val model = session.getData[String]("model").orElse(session.getData[String]("modelUpstream")).getOrElse("")
+      telemetry.addAiTokens(
+        provider = provider,
+        model = model,
+        inputTokens = state.promptTokens.toLong,
+        outputTokens = state.completionTokens.toLong
+      )
+      log.info(s"SSE AI usage: prompt=${state.promptTokens}, completion=${state.completionTokens}, total=${state.totalTokens} (provider='$provider', model='$model')")
+      writeMetadataUsageAttr(session, state.promptTokens, state.completionTokens)
+    }
+  }
+
   /**
    * Process response - extract token usage and add to telemetry
    */
   override def processResponse(session: Session): Future[Session] = {
+    // Streaming SSE path: tap the stream without buffering
+    if (session.isStreaming) {
+      session.responseStream match {
+        case Some(stream) =>
+          val telemetrySink: Sink[ByteString, Future[SseState]] =
+            Sink.fold(SseState("", 0, 0, 0))(parseSseChunk)
+
+          val tappedStream: AkkaSource[ByteString, Any] =
+            stream
+              .alsoToMat(telemetrySink)(Keep.right)
+              .mapMaterializedValue { futState =>
+                futState.foreach(s => reportSseTokens(s, session))(ec)
+                akka.NotUsed
+              }
+
+          Future.successful(session.copy(responseStream = Some(tappedStream)))
+
+        case None =>
+          Future.successful(session)
+      }
+    } else {
+    // Buffered (non-streaming) path
     session.responseBody match {
       case Some(responseBody) =>
         try {
@@ -178,6 +250,7 @@ class AITokensProcessor(
         incAiError(session, "empty_response")
         Future.successful(session)
     }
+    } // end else (non-streaming)
   }
 
   private def writeMetadataUsageAttr(session: Session, inTok: Int, outTok: Int): Unit = {

@@ -5,6 +5,7 @@ import java.util.concurrent.atomic.AtomicInteger
 
 import akka.http.scaladsl.model.HttpHeader
 import akka.http.scaladsl.model.{ContentType, ContentTypes, StatusCode, StatusCodes}
+import akka.stream.scaladsl.{Source => AkkaSource}
 import akka.util.ByteString
 
 /**
@@ -73,6 +74,7 @@ case class Session private[processor] (
   responseSource: ResponseSource.Source,
   responseStatus: StatusCode,
   responseContentType: ContentType,
+  responseStream: Option[AkkaSource[ByteString, Any]],
 
   // Pipeline control
   state: SessionState.SessionState,
@@ -98,6 +100,9 @@ case class Session private[processor] (
 
   /** All response headers (order not specified). */
   def responseHeaders: Seq[HttpHeader] = responseHeaderMap.values.toSeq
+
+  /** True when response is a streaming (SSE/chunked) source rather than a buffered body. */
+  def isStreaming: Boolean = responseStream.isDefined
 
   /**
    * Mark this session as rejected with given error details
@@ -199,7 +204,7 @@ case class Session private[processor] (
   }
 
   /**
-   * Set response data
+   * Set response data (buffered, non-streaming).  Clears any streaming source.
    */
   def withResponse(
     body: ByteString,
@@ -210,6 +215,7 @@ case class Session private[processor] (
   ): Session = {
     copy(
       responseBody = Some(body),
+      responseStream = None,
       responseSource = source,
       responseStatus = status,
       responseHeaderMap = Session.headersFromSeq(headers),
@@ -218,10 +224,30 @@ case class Session private[processor] (
   }
 
   /**
-   * Set response body only
+   * Set streaming response (SSE / chunked).  Clears buffered body.
+   */
+  def withResponseStream(
+    stream: AkkaSource[ByteString, Any],
+    source: ResponseSource.Source = ResponseSource.REMOTE,
+    status: StatusCode = StatusCodes.OK,
+    headers: Seq[HttpHeader] = Seq.empty,
+    contentType: ContentType = ContentTypes.`application/json`
+  ): Session = {
+    copy(
+      responseBody = None,
+      responseStream = Some(stream),
+      responseSource = source,
+      responseStatus = status,
+      responseHeaderMap = Session.headersFromSeq(headers),
+      responseContentType = contentType
+    )
+  }
+
+  /**
+   * Set response body only (buffered).  Clears any streaming source.
    */
   def withResponseBody(body: ByteString): Session = {
-    copy(responseBody = Some(body))
+    copy(responseBody = Some(body), responseStream = None)
   }
 
   /**
@@ -283,6 +309,7 @@ object Session {
     responseSource: ResponseSource.Source = ResponseSource.LOCAL,
     responseStatus: StatusCode = StatusCodes.OK,
     responseContentType: ContentType = ContentTypes.`application/json`,
+    responseStream: Option[AkkaSource[ByteString, Any]] = None,
     state: SessionState.SessionState = SessionState.CONTINUE,
     rejection: Option[Rejection] = None,
     processorData: Map[String, Any] = Map.empty,
@@ -299,6 +326,7 @@ object Session {
       responseSource,
       responseStatus,
       responseContentType,
+      responseStream,
       state,
       rejection,
       processorData,

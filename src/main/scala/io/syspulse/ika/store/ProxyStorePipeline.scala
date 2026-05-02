@@ -74,6 +74,7 @@ class ProxyStorePipeline(
   }
 
   private def withFallbackErrorResponse(session: Session): Session = {
+    if (session.isStreaming) return session
     session.rejection match {
       case Some(rejection) if session.responseBody.forall(_.isEmpty) || (isTransportFailure(rejection) && session.responseStatus.isSuccess()) =>
         val status = statusFor(rejection)
