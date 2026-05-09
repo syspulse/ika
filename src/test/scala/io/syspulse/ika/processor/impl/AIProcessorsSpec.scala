@@ -175,6 +175,106 @@ class AIProcessorsSpec extends AnyWordSpec with Matchers {
       result.requestBody.utf8String.parseJson.asJsObject.fields("model") shouldBe JsString("gpt-4-custom")
     }
 
+    // ── prefix-based routing (no "provider/" slash) ──────────────────────────
+
+    "resolve 'claude-haiku-4-5-20251001' to provider 'claude' via built-in prefix" in {
+      val processor = new AIRouterProcessor(
+        providerUris = providers + ("claude" -> "https://api.anthropic.com")
+      )
+      val request = """{"model": "claude-haiku-4-5-20251001", "messages": []}"""
+      val session = Session(requestBody = ByteString(request))
+
+      val result = Await.result(processor.process(session), 5.seconds)
+
+      result.isRejected shouldBe false
+      result.getData[String]("model")         shouldBe Some("claude-haiku-4-5-20251001")
+      result.getData[String]("modelUpstream") shouldBe Some("claude-haiku-4-5-20251001")
+      result.getData[String]("provider")      shouldBe Some("claude")
+      result.getData[String]("pool")          shouldBe Some("claude")
+      result.getData[String]("destination")   shouldBe Some("https://api.anthropic.com")
+      result.requestBody.utf8String.parseJson.asJsObject.fields("model") shouldBe JsString("claude-haiku-4-5-20251001")
+    }
+
+    "resolve 'gpt-4o-mini' to provider 'openai' via built-in prefix" in {
+      val processor = new AIRouterProcessor(providerUris = providers)
+      val request = """{"model": "gpt-4o-mini", "messages": []}"""
+      val session = Session(requestBody = ByteString(request))
+
+      val result = Await.result(processor.process(session), 5.seconds)
+
+      result.isRejected shouldBe false
+      result.getData[String]("provider") shouldBe Some("openai")
+      result.getData[String]("pool")     shouldBe Some("openai")
+    }
+
+    "resolve 'gemini-pro' to provider 'gemini' via built-in prefix" in {
+      val processor = new AIRouterProcessor(
+        providerUris = providers + ("gemini" -> "https://generativelanguage.googleapis.com")
+      )
+      val request = """{"model": "gemini-pro", "messages": []}"""
+      val session = Session(requestBody = ByteString(request))
+
+      val result = Await.result(processor.process(session), 5.seconds)
+
+      result.isRejected shouldBe false
+      result.getData[String]("provider") shouldBe Some("gemini")
+      result.getData[String]("pool")     shouldBe Some("gemini")
+    }
+
+    "resolve 'grok-2' to provider 'grok' via built-in prefix" in {
+      val processor = new AIRouterProcessor(
+        providerUris = providers + ("grok" -> "https://api.x.ai")
+      )
+      val request = """{"model": "grok-2", "messages": []}"""
+      val session = Session(requestBody = ByteString(request))
+
+      val result = Await.result(processor.process(session), 5.seconds)
+
+      result.isRejected shouldBe false
+      result.getData[String]("provider") shouldBe Some("grok")
+      result.getData[String]("pool")     shouldBe Some("grok")
+    }
+
+    "custom modelPrefixMapping overrides built-in prefix" in {
+      val processor = new AIRouterProcessor(
+        providerUris = providers + ("myrouter" -> "https://my.router"),
+        // "claude" would normally match built-in "claude" prefix; override it
+        modelPrefixMapping = Seq("claude" -> "myrouter")
+      )
+      val request = """{"model": "claude-3-opus", "messages": []}"""
+      val session = Session(requestBody = ByteString(request))
+
+      val result = Await.result(processor.process(session), 5.seconds)
+
+      result.isRejected shouldBe false
+      result.getData[String]("provider") shouldBe Some("myrouter")
+    }
+
+    "load custom modelPrefixMapping from config and apply it" in {
+      val cfg = ConfigFactory.parseString("""
+        type = "ai_router://"
+        providers {
+          meta {
+            uri = "https://llama.meta.com"
+          }
+        }
+        model_prefix {
+          "llama" = "meta"
+        }
+      """)
+      val processor = AIRouterProcessor.fromConfig("ai_router_prefix_test", cfg).head
+      val request = """{"model": "llama-3-70b", "messages": []}"""
+      val session = Session(requestBody = ByteString(request))
+
+      val result = Await.result(processor.process(session), 5.seconds)
+
+      result.isRejected shouldBe false
+      result.getData[String]("provider") shouldBe Some("meta")
+      result.getData[String]("pool")     shouldBe Some("meta")
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+
     "reject request without model field" in {
       val processor = AIRouterProcessor(providers)
       val request = """{"messages": []}"""
@@ -214,7 +314,7 @@ class AIProcessorsSpec extends AnyWordSpec with Matchers {
 
   "AITokensProcessor" should {
     "extract and strip metadata from request payload" in {
-      val processor = new AITokensProcessor()
+      val processor = new AITokensProcessor(metadataUsageAttr = Some("{tid}-{pid}-{customer_id}"))
       val request =
         """{
           |  "metadata": { "pid": 7, "tid": 9, "customer_id": "c-1" },
@@ -265,6 +365,44 @@ class AIProcessorsSpec extends AnyWordSpec with Matchers {
             "openai/gpt-4o-mini" -> JsObject(
               "input_tokens" -> JsNumber(11),
               "output_tokens" -> JsNumber(22)
+            )
+          )
+        )
+      )
+    }
+
+    "extract dynamic metadata fields from metadataUsageAttr pattern" in {
+      val telemetry = Telemetry()
+      val tokens = new AITokensProcessor(metadataUsageAttr = Some("org-{tenant}-user-{user_id}"))
+      val meta = new MetaProcessor(Seq("x-meta"))
+
+      val request =
+        """{
+          |  "metadata": { "tenant": "acme", "user_id": 42, "ignored": "x" },
+          |  "model": "openai/gpt-4o-mini",
+          |  "messages": []
+          |}""".stripMargin
+
+      val s1 = Await.result(
+        meta.processRequest(Session(requestBody = ByteString(request)).putData("telemetry", telemetry)
+          .addRequestHeader(akka.http.scaladsl.model.headers.RawHeader("x-meta", "tenant=acme,user_id=42"))),
+        5.seconds
+      )
+      val s2 = Await.result(tokens.processRequest(s1), 5.seconds)
+        .putData("provider", "openai").putData("model", "openai/gpt-4o-mini")
+
+      s2.getData[String]("tenant") shouldBe Some("acme")
+      s2.getData[Int]("user_id") shouldBe Some(42)
+      s2.getData[String]("ignored") shouldBe None
+
+      Await.result(tokens.processResponse(s2.copy(responseBody = Some(ByteString("""{ "usage": { "input_tokens": 4, "output_tokens": 6 } }""")))), 5.seconds)
+
+      telemetry.getAttr("org-acme-user-42") shouldBe Some(
+        JsObject(
+          "openai" -> JsObject(
+            "openai/gpt-4o-mini" -> JsObject(
+              "input_tokens" -> JsNumber(4),
+              "output_tokens" -> JsNumber(6)
             )
           )
         )

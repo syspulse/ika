@@ -31,7 +31,13 @@ for c in `seq 0 $COUNT`; do
       cp $DATA_JSON $TMP      
    fi 
 
-   curl -S -s -D /dev/stderr -X POST --data @"$TMP" -H 'Content-Type: application/json' -H "Authorization: Bearer $ACCESS_TOKEN" $SERVICE_URI
+   curl -S -s -D /dev/stderr \
+     -X POST \
+     --data @"$TMP" \
+     -H 'Content-Type: application/json' \
+     -H "Authorization: Bearer $ACCESS_TOKEN" \
+     $SERVICE_URI
+   
    sleep $SLEEP
    rm $TMP
 done

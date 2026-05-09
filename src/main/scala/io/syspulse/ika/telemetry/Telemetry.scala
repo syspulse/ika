@@ -320,6 +320,15 @@ class Telemetry {
       case _ => '_'
     }.mkString
 
+  // For metric keys we want `ai.tokens.<provider>.<model>` even if model was stored as `provider/model`.
+  private def metricModelKey(provider: String, model: String): String = {
+    val p = Option(provider).getOrElse("").trim
+    val m0 = Option(model).getOrElse("").trim
+    val prefix = if (p.nonEmpty) s"$p/" else ""
+    val m = if (prefix.nonEmpty && m0.startsWith(prefix)) m0.stripPrefix(prefix) else m0
+    sanitizeKeyPart(m)
+  }
+
   /**
    * Flatten all telemetry data to key/value strings (single-line friendly).
    * Includes counters, gauges, histograms, uptime, attributes (as compact JSON), and ai token map.
@@ -342,7 +351,7 @@ class Telemetry {
       getAiTokens.flatMap { case (provider, models) =>
         val p = sanitizeKeyPart(provider)
         models.flatMap { case (model, (inTok, outTok)) =>
-          val m = sanitizeKeyPart(model)
+          val m = metricModelKey(provider, model)
           Map(
             s"ai.tokens.${p}.${m}.input" -> inTok.toString,
             s"ai.tokens.${p}.${m}.output" -> outTok.toString

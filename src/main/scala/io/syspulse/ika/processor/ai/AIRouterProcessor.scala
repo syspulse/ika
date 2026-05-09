@@ -39,6 +39,8 @@ class AIRouterProcessor(
   providerUris: Map[String, String] = Map.empty,
   defaultProvider: String = "openai",
   modelProviderMapping: Map[String, String] = Map.empty,
+  // Custom prefix→provider entries; prepended before defaultModelPrefixMappings so they take priority.
+  modelPrefixMapping: Seq[(String, String)] = Seq.empty,
   providerApiHeaderName: Map[String, String] = Map.empty,
   // NOTE: values here are FINAL header values (already formatted with api_key if needed).
   providerApiHeaderValue: Map[String, String] = Map.empty,
@@ -166,13 +168,19 @@ class AIRouterProcessor(
   /**
    * Extract provider and provider-facing model name from model string.
    *
-   * Format: "provider/model-name" → (provider, model-name)
-   * If no "/" found, use model mapping or default provider.
+   * Resolution priority (highest first):
+   * 1. "provider/model-name" slash-prefix  → (provider, model-name)
+   * 2. Exact match in modelProviderMapping  → (provider, model)
+   * 3. Prefix match: custom modelPrefixMapping, then AIRouterProcessor.defaultModelPrefixMappings
+   * 4. defaultProvider
    *
    * Examples:
-   * - "openai/gpt-4o-mini" → ("openai", "gpt-4o-mini")
-   * - "anthropic/claude-3-opus" → ("anthropic", "claude-3-opus")
-   * - "gpt-4" → ("openai", "gpt-4")  // default provider
+   * - "openai/gpt-4o-mini"           → ("openai",     "gpt-4o-mini")
+   * - "anthropic/claude-3-opus"      → ("anthropic",   "claude-3-opus")
+   * - "claude-haiku-4-5-20251001"    → ("claude",      "claude-haiku-4-5-20251001")
+   * - "gpt-4o-mini"                  → ("openai",      "gpt-4o-mini")
+   * - "gemini-pro"                   → ("gemini",      "gemini-pro")
+   * - "grok-2"                       → ("grok",        "grok-2")
    */
   private def extractProviderAndModel(model: String): (String, String) = {
     val parts = model.split("/", 2)
@@ -180,8 +188,17 @@ class AIRouterProcessor(
     if (parts.length > 1) {
       (parts(0), parts(1))
     } else {
-      // No provider specified, check mapping or use default
-      (modelProviderMapping.getOrElse(model, defaultProvider), model)
+      // Exact match takes priority over prefix matching
+      modelProviderMapping.get(model) match {
+        case Some(provider) => (provider, model)
+        case None =>
+          // Custom prefixes override built-in ones
+          val allPrefixes = modelPrefixMapping ++ AIRouterProcessor.defaultModelPrefixMappings
+          val provider = allPrefixes
+            .collectFirst { case (prefix, p) if model.startsWith(prefix) => p }
+            .getOrElse(defaultProvider)
+          (provider, model)
+      }
     }
   }
 
@@ -191,6 +208,18 @@ class AIRouterProcessor(
 
 object AIRouterProcessor extends ProcessorConfigurable {
   override val tpe: String = "ai_router"
+
+  /**
+   * Built-in model-name-prefix → provider mappings checked when no "provider/" slash prefix
+   * is present and no exact modelProviderMapping entry matches.
+   * Order matters: first match wins.
+   */
+  val defaultModelPrefixMappings: Seq[(String, String)] = Seq(
+    "claude"  -> "claude",
+    "gpt-"    -> "openai",
+    "gemini"  -> "gemini",
+    "grok"    -> "grok",
+  )
 
   /**
    * Create AIRouterProcessor with default settings
@@ -280,9 +309,22 @@ object AIRouterProcessor extends ProcessorConfigurable {
         }
       }
 
+    // Optional custom prefix→provider overrides; prepended before built-in defaults.
+    // Config format:
+    //   model_prefix { "llama" = "meta", "mistral" = "mistral" }
+    val customPrefixMappings: Seq[(String, String)] =
+      if (cfg.hasPath("model_prefix")) {
+        val pm = cfg.getConfig("model_prefix")
+        pm.root().keySet().toArray(new Array[String](0)).toSeq
+          .map(k => k -> pm.getString(k))
+      } else {
+        Seq.empty
+      }
+
     Seq(new AIRouterProcessor(
       providerUris = providerUris,
       defaultProvider = defaultProvider,
+      modelPrefixMapping = customPrefixMappings,
       providerApiHeaderName = providerHeaderNames,
       providerApiHeaderValue = providerHeaderValuesFormatted,
       providerHeaders = providerHeaders

@@ -16,16 +16,11 @@ import akka.actor.ActorSystem
 /**
  * AITokensProcessor extracts token usage from AI API responses and records to telemetry.
  *
- * This processor parses OpenAI-compatible API responses and extracts token usage metrics.
+ * This processor parses AI API responses and extracts token usage metrics.
  *
- * Expected response format (OpenAI API):
- * {
- *   "usage": {
- *     "prompt_tokens": 10,
- *     "completion_tokens": 20,
- *     "total_tokens": 30
- *   }
- * }
+ * Request metadata is extracted dynamically from metadataUsageAttr placeholders.
+ * For example, metadataUsageAttr="{tid}-{pid}-{customer_id}" reads fields
+ * "tid", "pid", and "customer_id" from the root "metadata" object.
  *
  * Session data written:
  * - "promptTokens" (Int) - Number of prompt tokens
@@ -45,13 +40,25 @@ class AITokensProcessor(
   override val name: String = "AITokens"
 
   private val log = Logger(name)
+  private val metadataAttrTemplate = metadataUsageAttr.map(_.trim).filter(_.nonEmpty)
+  private val placeholderPattern = "\\{([^{}]+)\\}".r
+  private val metadataFields: Set[String] =
+    metadataAttrTemplate
+      .map(t => placeholderPattern.findAllMatchIn(t).map(_.group(1)).filter(_.nonEmpty).toSet)
+      .getOrElse(Set.empty)
+
+  private case class Usage(inputTokens: Option[Int], outputTokens: Option[Int], totalTokens: Option[Int]) {
+    def hasTokens: Boolean = inputTokens.exists(_ > 0) || outputTokens.exists(_ > 0) || totalTokens.exists(_ > 0)
+  }
+
+  private case class TelemetryTarget(provider: String, model: String)
 
   /**
    * Process request - extract root metadata and strip it before sending upstream.
    *
    * Expected request shape:
    * {
-   *   "metadata": { "pid": Int, "tid": Int, "customer_id": String },
+   *   "metadata": { ... fields referenced by metadataUsageAttr ... },
    *   ...
    * }
    */
@@ -59,12 +66,9 @@ class AITokensProcessor(
     try {
       val json = session.requestBody.utf8String.parseJson.asJsObject
 
-      // Reset per-request metadata fields
       val s0 = session
         .removeData("aiRequestMetadataPresent")
-        .removeData("pid")
-        .removeData("tid")
-        .removeData("customer_id")
+        .removeData("aiMetadata")
 
       val (s1, fieldsNoMeta) = extractAndStripMetadata(s0, json)
 
@@ -99,7 +103,7 @@ class AITokensProcessor(
   }
 
   // SSE state accumulated per stream chunk
-  private case class SseState(buffer: String, promptTokens: Int, completionTokens: Int, totalTokens: Int)
+  private case class SseState(buffer: String, usage: Usage, responseModel: Option[String])
 
   private def parseSseChunk(state: SseState, chunk: ByteString): SseState = {
     val combined = state.buffer + chunk.utf8String
@@ -116,42 +120,17 @@ class AITokensProcessor(
         .foldLeft(acc) { (s, dataStr) =>
           try {
             val json = dataStr.parseJson.asJsObject
-            // Locate usage regardless of API variant:
-            //   Chat Completions: top-level "usage" field
-            //   Responses API:    "response.usage" inside a "response.completed" event
-            val usageOpt: Option[JsObject] =
-              json.fields.get("usage").collect { case o: JsObject => o }
-                .orElse(
-                  json.fields.get("response").collect { case o: JsObject => o }
-                    .flatMap(_.fields.get("usage").collect { case o: JsObject => o })
-                )
-            usageOpt match {
-              case Some(usageObj) =>
-                val pt = extractIntField(usageObj, "prompt_tokens").orElse(extractIntField(usageObj, "input_tokens")).getOrElse(s.promptTokens)
-                val ct = extractIntField(usageObj, "completion_tokens").orElse(extractIntField(usageObj, "output_tokens")).getOrElse(s.completionTokens)
-                val tt = extractIntField(usageObj, "total_tokens").getOrElse(pt + ct)
-                s.copy(promptTokens = pt, completionTokens = ct, totalTokens = tt)
-              case None => s
-            }
+            val usage = extractUsage(json).map(u => mergeUsage(s.usage, u)).getOrElse(s.usage)
+            val responseModel = extractResponseModel(json).orElse(s.responseModel)
+            s.copy(usage = usage, responseModel = responseModel)
           } catch { case _: Exception => s }
         }
     }
   }
 
   private def reportSseTokens(state: SseState, session: Session): Unit = {
-    if (state.promptTokens == 0 && state.completionTokens == 0) return
-    session.getData[Telemetry]("telemetry").foreach { telemetry =>
-      val provider = session.getData[String]("provider").getOrElse("openai")
-      val model = session.getData[String]("model").orElse(session.getData[String]("modelUpstream")).getOrElse("")
-      telemetry.addAiTokens(
-        provider = provider,
-        model = model,
-        inputTokens = state.promptTokens.toLong,
-        outputTokens = state.completionTokens.toLong
-      )
-      log.info(s"SSE AI usage: prompt=${state.promptTokens}, completion=${state.completionTokens}, total=${state.totalTokens} (provider='$provider', model='$model')")
-      writeMetadataUsageAttr(session, state.promptTokens, state.completionTokens)
-    }
+    if (!state.usage.hasTokens) return
+    recordUsage(session, state.usage, isSse = true, responseModel = state.responseModel)
   }
 
   /**
@@ -163,7 +142,7 @@ class AITokensProcessor(
       session.responseStream match {
         case Some(stream) =>
           val telemetrySink: Sink[ByteString, Future[SseState]] =
-            Sink.fold(SseState("", 0, 0, 0))(parseSseChunk)
+            Sink.fold(SseState("", Usage(None, None, None), None))(parseSseChunk)
 
           val tappedStream: AkkaSource[ByteString, Any] =
             stream
@@ -191,50 +170,12 @@ class AITokensProcessor(
             incAiError(session, "response_error")
           }
 
-          // Extract usage field
-          json.fields.get("usage") match {
-            case Some(usageObj: JsObject) =>
-              // Support multiple provider schemas:
-              // - OpenAI legacy: prompt_tokens / completion_tokens / total_tokens
-              // - OpenAI Responses + Anthropic: input_tokens / output_tokens / total_tokens
-              val promptTokens = extractIntField(usageObj, "prompt_tokens").orElse(extractIntField(usageObj, "input_tokens"))
-              val completionTokens = extractIntField(usageObj, "completion_tokens").orElse(extractIntField(usageObj, "output_tokens"))
-              val totalTokens =
-                extractIntField(usageObj, "total_tokens")
-                  .orElse(for { in <- promptTokens; out <- completionTokens } yield in + out)
-
-              // Store in session
-              var updatedSession = session
-              promptTokens.foreach(t => updatedSession = updatedSession.putData("promptTokens", t))
-              completionTokens.foreach(t => updatedSession = updatedSession.putData("completionTokens", t))
-              totalTokens.foreach(t => updatedSession = updatedSession.putData("totalTokens", t))
-
-              // Aggregate into telemetry
-              session.getData[Telemetry]("telemetry").foreach { telemetry =>
-                val provider = session.getData[String]("provider").getOrElse("openai")
-                val model = session.getData[String]("model").orElse(session.getData[String]("modelUpstream")).getOrElse("")
-                telemetry.addAiTokens(
-                  provider = provider,
-                  model = model,
-                  inputTokens = promptTokens.getOrElse(0).toLong,
-                  outputTokens = completionTokens.getOrElse(0).toLong
-                )
-
-                log.info(
-                  s"AI usage: prompt=${promptTokens.getOrElse(0)}, completion=${completionTokens.getOrElse(0)}, total=${totalTokens.getOrElse(0)} (provider='$provider', model='$model')"
-                )
-              }
-
-              // Save per-metadata usage object attribute (optional; configured via metadataUsageAttr)
-              writeMetadataUsageAttr(session, promptTokens.getOrElse(0), completionTokens.getOrElse(0))
-
+          // Extract usage field from normal responses or response.completed-style payloads.
+          extractUsage(json) match {
+            case Some(usage) =>
+              val updatedSession = putUsageData(session, usage)
+              recordUsage(session, usage, isSse = false, responseModel = extractResponseModel(json))
               Future.successful(updatedSession)
-
-            case Some(other) =>
-              log.warn(s"Usage field is not an object: $other")
-              // Count as AI error only if response isn't a known error payload (otherwise already counted)
-              if (!isErrorResponse(json)) incAiError(session, "usage_invalid")
-              Future.successful(session)
 
             case None =>
               log.warn("No usage field in response (possibly streaming or error response)")
@@ -262,39 +203,52 @@ class AITokensProcessor(
     } // end else (non-streaming)
   }
 
-  private def writeMetadataUsageAttr(session: Session, inTok: Int, outTok: Int): Unit = {
-    val templateOpt = metadataUsageAttr.map(_.trim).filter(_.nonEmpty)
-    if (templateOpt.isEmpty) return
+  private def recordUsage(session: Session, usage: Usage, isSse: Boolean, responseModel: Option[String]): Unit = {
+    session.getData[Telemetry]("telemetry").foreach { telemetry =>
+      val target = telemetryTarget(session, responseModel)
+      val inTok = usage.inputTokens.getOrElse(0).toLong
+      val outTok = usage.outputTokens.getOrElse(0).toLong
+      val totalTok = usage.totalTokens.getOrElse((inTok + outTok).toInt)
 
-    val pidOpt = session.getData[Int]("pid")
-    val tidOpt = session.getData[Int]("tid")
-    val cidOpt = session.getData[String]("customer_id")
-    (pidOpt, tidOpt, cidOpt) match {
-      case (Some(pid), Some(tid), Some(customerId)) =>
-        val attrName = interpolate(templateOpt.get, pid, tid, customerId)
-        val provider = session.getData[String]("provider").getOrElse("openai")
-        val model = session.getData[String]("model").orElse(session.getData[String]("modelUpstream")).getOrElse("")
+      telemetry.addAiTokens(
+        provider = target.provider,
+        model = target.model,
+        inputTokens = inTok,
+        outputTokens = outTok
+      )
 
-        session.getData[Telemetry]("telemetry") match {
-          case Some(t) =>
-            t.updateUsageAttr(
-              name = attrName,
-              inputTokens = inTok.toLong,
-              outputTokens = outTok.toLong,
-              provider = provider,
-              model = model
-            )
+      writeMetadataUsageAttr(session, usage, target, telemetry)
 
-            log.info(
-              s"Telemetry metadata usage updated: attr='$attrName', tid=$tid, pid=$pid, customer_id='$customerId', input_tokens=$inTok, output_tokens=$outTok, provider='$provider', model='$model'"
-            )
+      val prefix = if (isSse) "SSE AI usage" else "AI usage"
+      log.info(
+        s"$prefix: input=$inTok, output=$outTok, total=$totalTok (provider='${target.provider}', model='${target.model}')"
+      )
+    }
+  }
 
-          case None =>
-            // no telemetry attached
-            ()
-        }
-      case _ =>
-        ()
+  private def writeMetadataUsageAttr(session: Session, usage: Usage, target: TelemetryTarget, telemetry: Telemetry): Unit = {
+    metadataAttrTemplate.foreach { template =>
+      val metaFromBody = session.getData[Map[String, String]]("aiMetadata").getOrElse(Map.empty)
+      val metaFromHeaders = session.getData[Map[String, String]]("meta").getOrElse(Map.empty)
+      val metadata = metaFromHeaders ++ metaFromBody
+
+      if (metadata.nonEmpty && metadataFields.subsetOf(metadata.keySet)) {
+        val attrName = interpolate(template, metadata)
+          telemetry.updateUsageAttr(
+            name = attrName,
+            inputTokens = usage.inputTokens.getOrElse(0).toLong,
+            outputTokens = usage.outputTokens.getOrElse(0).toLong,
+            provider = target.provider,
+            model = target.model
+          )
+
+          log.info(
+            s"Telemetry metadata usage updated: attr='$attrName', metadata=${metadata}, input_tokens=${usage.inputTokens.getOrElse(0)}, output_tokens=${usage.outputTokens.getOrElse(0)}, provider='${target.provider}', model='${target.model}'"
+          )
+      } else if (metadata.nonEmpty) {
+        val missing = metadataFields.diff(metadata.keySet).toSeq.sorted.mkString(",")
+        log.debug(s"Skipping metadata usage attr '$template': missing metadata fields [$missing], metadata=$metadata")
+      } else ()
     }
   }
 
@@ -312,18 +266,78 @@ class AITokensProcessor(
     }
   }
 
+  private def extractUsage(json: JsObject): Option[Usage] =
+    extractUsageObject(json).map { usageObj =>
+      val inputTokens =
+        extractIntField(usageObj, "input_tokens")
+          .orElse(extractIntField(usageObj, "prompt_tokens"))
+      val outputTokens =
+        extractIntField(usageObj, "output_tokens")
+          .orElse(extractIntField(usageObj, "completion_tokens"))
+      val totalTokens =
+        extractIntField(usageObj, "total_tokens")
+          .orElse(for { in <- inputTokens; out <- outputTokens } yield in + out)
+
+      Usage(inputTokens, outputTokens, totalTokens)
+    }
+
+  private def extractUsageObject(json: JsObject): Option[JsObject] =
+    json.fields.get("usage").collect { case o: JsObject => o }
+      .orElse(
+        json.fields.get("response").collect { case o: JsObject => o }
+          .flatMap(_.fields.get("usage").collect { case o: JsObject => o })
+      )
+
+  private def extractResponseModel(json: JsObject): Option[String] =
+    json.fields.get("model").collect { case JsString(v) if v.trim.nonEmpty => v.trim }
+      .orElse(
+        json.fields.get("response").collect { case o: JsObject => o }
+          .flatMap(_.fields.get("model").collect { case JsString(v) if v.trim.nonEmpty => v.trim })
+      )
+
+  private def mergeUsage(prev: Usage, next: Usage): Usage =
+    Usage(
+      inputTokens = next.inputTokens.orElse(prev.inputTokens),
+      outputTokens = next.outputTokens.orElse(prev.outputTokens),
+      totalTokens = next.totalTokens.orElse(prev.totalTokens)
+    )
+
+  private def putUsageData(session: Session, usage: Usage): Session = {
+    var updated = session
+    usage.inputTokens.foreach(t => updated = updated.putData("promptTokens", t))
+    usage.outputTokens.foreach(t => updated = updated.putData("completionTokens", t))
+    usage.totalTokens.foreach(t => updated = updated.putData("totalTokens", t))
+    updated
+  }
+
+  private def telemetryTarget(session: Session, responseModel: Option[String]): TelemetryTarget =
+    TelemetryTarget(
+      provider = session.getData[String]("provider").getOrElse("openai"),
+      model = session.getData[String]("model")
+        .orElse(responseModel)
+        .orElse(session.getData[String]("modelUpstream"))
+        .getOrElse("")
+    )
+
   private def extractAndStripMetadata(session: Session, json: JsObject): (Session, Map[String, JsValue]) = {
     json.fields.get("metadata") match {
       case Some(metaObj: JsObject) =>
         val s0 = session.putData("aiRequestMetadataPresent", true)
-        val pidOpt = metaObj.fields.get("pid") collect { case JsNumber(v) => v.toInt }
-        val tidOpt = metaObj.fields.get("tid") collect { case JsNumber(v) => v.toInt }
-        val cidOpt = metaObj.fields.get("customer_id") collect { case JsString(v) => v }
+        val extracted = metadataFields.flatMap { field =>
+          metaObj.fields.get(field).flatMap(metadataValueToString).map(field -> _)
+        }.toMap
 
-        val s1 = cidOpt.map(v => s0.putData("customer_id", v)).getOrElse(s0)
-        val s2 = tidOpt.map(v => s1.putData("tid", v)).getOrElse(s1)
-        val s3 = pidOpt.map(v => s2.putData("pid", v)).getOrElse(s2)
-        (s3, json.fields - "metadata")
+        val s1 =
+          if (extracted.nonEmpty) s0.putData("aiMetadata", extracted)
+          else s0.removeData("aiMetadata")
+
+        // Keep direct session fields for placeholders so downstream processors/tests can read them,
+        // without hard-coding a particular metadata schema.
+        val s2 = extracted.foldLeft(s1) { case (acc, (field, value)) =>
+          value.toIntOption.map(v => acc.putData(field, v)).getOrElse(acc.putData(field, value))
+        }
+
+        (s2, json.fields - "metadata")
 
       case Some(other) =>
         log.warn(s"metadata field is not an object: $other")
@@ -334,14 +348,16 @@ class AITokensProcessor(
     }
   }
 
-  private def interpolate(template: String, pid: Int, tid: Int, customerId: String): String = {
-    template
-      .replace("{pid}", pid.toString)
-      .replace("{tid}", tid.toString)
-      .replace("{customer_id}", customerId)
-      // Backward-compat typo support (as in example)
-      .replace("{cusomter_id}", customerId)
+  private def metadataValueToString(value: JsValue): Option[String] = value match {
+    case JsString(v) => Some(v)
+    case JsNumber(v) => Some(v.toString)
+    case JsBoolean(v) => Some(v.toString)
+    case JsNull => None
+    case other => Some(other.compactPrint)
   }
+
+  private def interpolate(template: String, metadata: Map[String, String]): String =
+    placeholderPattern.replaceAllIn(template, m => metadata.getOrElse(m.group(1), ""))
 }
 
 object AITokensProcessor {
