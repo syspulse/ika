@@ -1,4 +1,4 @@
-package io.syspulse.ika.processor.impl
+package io.syspulse.ika.processor.core
 
 import java.util.Locale
 import scala.concurrent.{ExecutionContext, Future}

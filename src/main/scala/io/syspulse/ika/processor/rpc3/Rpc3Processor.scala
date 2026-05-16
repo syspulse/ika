@@ -7,7 +7,7 @@ import akka.util.ByteString
 
 import io.syspulse.ika.processor.Session
 import io.syspulse.ika.processor.Processor
-import io.syspulse.ika.processor.impl.CacheProcessor
+import io.syspulse.ika.processor.core.CacheProcessor
 import io.syspulse.ika.processor.rpc3.{ProxyRpcReq, ProxyRpcBlockRes, ProxyJson}
 import io.syspulse.ika.processor.uri.Rpc3URI
 import io.syspulse.ika.processor.util.ProcessorConfigurable
@@ -149,7 +149,7 @@ abstract class Rpc3Processor(
     s"$method-${params.toString}"
   }
 
-  import io.syspulse.ika.processor.impl.HeaderProcessor
+  import io.syspulse.ika.processor.core.HeaderProcessor
   private val header = new HeaderProcessor(
     removeRequest = Set("timeout-access", "host"),
     addRequest = Map("Content-Type" -> "application/json")

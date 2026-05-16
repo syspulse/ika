@@ -12,7 +12,7 @@ import scala.io.Source
 import akka.actor.ActorSystem
 import akka.util.ByteString
 import io.syspulse.ika.processor.{Session, ProcessorPipeline}
-import io.syspulse.ika.processor.impl.HttpProcessor
+import io.syspulse.ika.processor.core.HttpProcessor
 import io.syspulse.ika.processor.ResponseSource
 
 class SolanaProcessorSpec extends AnyWordSpec with Matchers with ScalaFutures {

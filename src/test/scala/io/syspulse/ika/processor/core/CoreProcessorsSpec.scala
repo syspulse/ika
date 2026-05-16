@@ -1,4 +1,4 @@
-package io.syspulse.ika.processor.impl
+package io.syspulse.ika.processor.core
 
 import org.scalatest.matchers.should.Matchers
 import org.scalatest.wordspec.AnyWordSpec
@@ -12,6 +12,7 @@ import io.syspulse.ika.processor.{Session, ProcessorPipeline, RequestProcessor}
 import io.syspulse.ika.processor.rpc3.Rpc3Processor
 import io.syspulse.ika.processor.ResponseSource
 import akka.util.ByteString
+import io.syspulse.ika.processor.core.{CacheProcessor, HeaderProcessor, HttpProcessor, LoadBalancerStrategy, PoolProcessor, ThrottleProcessor, TimeoutProcessor}
 
 class CoreProcessorsSpec extends AnyWordSpec with Matchers with ScalaFutures {
 

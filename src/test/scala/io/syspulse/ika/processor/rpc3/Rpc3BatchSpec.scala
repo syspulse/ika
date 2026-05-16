@@ -12,7 +12,7 @@ import spray.json._
 
 import akka.actor.ActorSystem
 import io.syspulse.ika.processor.{Session, ProcessorPipeline}
-import io.syspulse.ika.processor.impl.HttpProcessor
+import io.syspulse.ika.processor.core.HttpProcessor
 import io.syspulse.ika.processor.ResponseSource
 import akka.util.ByteString
 

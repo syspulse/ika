@@ -1,7 +1,8 @@
-package io.syspulse.ika.processor.impl
+package io.syspulse.ika.processor.core
 
 import org.scalatest.matchers.should.Matchers
 import org.scalatest.wordspec.AnyWordSpec
+import io.syspulse.ika.processor.core.HttpProcessor
 
 class HttpProcessorAppendSuffixSpec extends AnyWordSpec with Matchers {
 

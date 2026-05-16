@@ -1,4 +1,4 @@
-package io.syspulse.ika.processor.impl
+package io.syspulse.ika.processor.core
 
 import scala.concurrent.{Await, ExecutionContext, Future}
 import scala.concurrent.duration._
@@ -19,6 +19,7 @@ import io.syspulse.ika.processor.{ProcessorPipeline, Session}
 import io.syspulse.ika.store.ProxyStorePipeline
 
 import org.scalatest.concurrent.ScalaFutures
+import io.syspulse.ika.processor.core.{HttpProcessor, ProxyProcessor}
 
 class ProxyProcessorSpec extends AnyWordSpec with Matchers with ScalaFutures {
 

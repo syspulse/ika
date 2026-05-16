@@ -19,7 +19,7 @@ import akka.util.ByteString
 
 import io.syspulse.ika.processor.ProcessorPipeline
 import io.syspulse.ika.processor.ai.AITokensProcessor
-import io.syspulse.ika.processor.impl.{HeaderProcessor, HttpProcessor, PoolProcessor, RetryProcessor}
+import io.syspulse.ika.processor.core.{HeaderProcessor, HttpProcessor, PoolProcessor, RetryProcessor}
 import io.syspulse.ika.store.ProxyStorePipeline
 import io.syspulse.ika.telemetry.Telemetry
 

@@ -1,4 +1,4 @@
-package io.syspulse.ika.processor.impl
+package io.syspulse.ika.processor.core
 
 import org.scalatest.matchers.should.Matchers
 import org.scalatest.wordspec.AnyWordSpec
@@ -11,6 +11,7 @@ import com.typesafe.config.ConfigFactory
 import akka.util.ByteString
 
 import io.syspulse.ika.processor.Session
+import io.syspulse.ika.processor.core.{AuthProcessor, AuthStrategy}
 
 class AuthProcessorSpec extends AnyWordSpec with Matchers {
   implicit val ec: ExecutionContext = ExecutionContext.global

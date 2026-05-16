@@ -11,7 +11,7 @@ import spray.json._
 import io.syspulse.skel.util.Util
 
 import io.syspulse.ika.processor.{RequestProcessor, Session, Processor}
-import io.syspulse.ika.processor.impl.HeaderProcessor
+import io.syspulse.ika.processor.core.HeaderProcessor
 import io.syspulse.ika.processor.util.ProcessorConfigurable
 import io.syspulse.ika.processor.uri.AiURI
 /**

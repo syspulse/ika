@@ -6,7 +6,7 @@ import scala.concurrent.{Future, ExecutionContext, Await}
 import scala.concurrent.duration._
 
 import akka.actor.ActorSystem
-import io.syspulse.ika.processor.impl.CacheProcessor
+import io.syspulse.ika.processor.core.CacheProcessor
 import io.syspulse.ika.processor.ResponseSource
 import akka.util.ByteString
 

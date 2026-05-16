@@ -1,4 +1,4 @@
-package io.syspulse.ika.processor.impl
+package io.syspulse.ika.processor.core
 
 import scala.concurrent.{Future, ExecutionContext}
 import scala.concurrent.duration.FiniteDuration
@@ -316,7 +316,7 @@ object HttpProcessor extends ProcessorConfigurable {
   override val tpe: String = "http"
 
   /** Append suffix path+query (like "/v1/x?y=1") to base destination. */
-  private[impl] def appendSuffix(base: String, suffix: String): Try[String] = Try {
+  private[core] def appendSuffix(base: String, suffix: String): Try[String] = Try {
     val s = Option(suffix).getOrElse("").trim
     if (s.isEmpty || s == "/") base
     else {

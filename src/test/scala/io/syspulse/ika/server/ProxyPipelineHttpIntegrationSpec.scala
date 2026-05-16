@@ -19,13 +19,7 @@ import akka.stream.Materializer
 import io.syspulse.ika.processor.{ProcessorPipeline}
 import io.syspulse.ika.processor.util.ProcessorPipelineBuilder
 import io.syspulse.ika.processor.util.PipelineProfile
-import io.syspulse.ika.processor.impl.{
-  HttpProcessor,
-  PoolProcessor,
-  RejectionProcessor,
-  RetryProcessor,
-  TimeoutProcessor
-}
+import io.syspulse.ika.processor.core.{HttpProcessor, PoolProcessor, RejectionProcessor, RetryProcessor, TimeoutProcessor}
 import io.syspulse.ika.processor.rpc3.Rpc3Processor
 import io.syspulse.ika.store.{ProxyStore, ProxyStorePipeline}
 import akka.util.ByteString

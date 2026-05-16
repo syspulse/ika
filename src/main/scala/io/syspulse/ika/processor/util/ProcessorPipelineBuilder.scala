@@ -6,7 +6,7 @@ import com.typesafe.config.{Config => TypesafeConfig}
 import scala.concurrent.ExecutionContext
 import scala.jdk.CollectionConverters._
 
-import io.syspulse.ika.processor.impl._
+import io.syspulse.ika.processor.core._
 import io.syspulse.ika.processor.Processor
 import io.syspulse.ika.processor.uri.{CacheURI, PoolURI, Rpc3URI}
 import io.syspulse.ika.processor.rpc3.Rpc3Processor

@@ -18,12 +18,7 @@ import akka.util.ByteString
 import com.typesafe.config.ConfigFactory
 
 import io.syspulse.ika.processor.ProcessorPipeline
-import io.syspulse.ika.processor.impl.{
-  HeaderProcessor,
-  HttpProcessor,
-  PoolProcessor,
-  RetryProcessor
-}
+import io.syspulse.ika.processor.core.{HeaderProcessor, HttpProcessor, PoolProcessor, RetryProcessor}
 import io.syspulse.ika.store.ProxyStorePipeline
 
 /**

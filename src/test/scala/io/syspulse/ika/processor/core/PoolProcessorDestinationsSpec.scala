@@ -1,4 +1,4 @@
-package io.syspulse.ika.processor.impl
+package io.syspulse.ika.processor.core
 
 import com.typesafe.config.ConfigFactory
 import org.scalatest.matchers.should.Matchers
@@ -12,6 +12,7 @@ import akka.actor.ActorSystem
 
 import io.syspulse.ika.processor.Session
 import akka.util.ByteString
+import io.syspulse.ika.processor.core.PoolProcessor
 
 class PoolProcessorDestinationsSpec extends AnyWordSpec with Matchers with BeforeAndAfterAll {
 

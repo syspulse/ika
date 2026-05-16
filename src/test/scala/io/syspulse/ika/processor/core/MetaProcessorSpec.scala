@@ -1,4 +1,4 @@
-package io.syspulse.ika.processor.impl
+package io.syspulse.ika.processor.core
 
 import org.scalatest.matchers.should.Matchers
 import org.scalatest.wordspec.AnyWordSpec
@@ -11,6 +11,7 @@ import akka.util.ByteString
 import akka.http.scaladsl.model.headers.RawHeader
 
 import io.syspulse.ika.processor.Session
+import io.syspulse.ika.processor.core.MetaProcessor
 
 class MetaProcessorSpec extends AnyWordSpec with Matchers {
   implicit val ec: ExecutionContext = ExecutionContext.global

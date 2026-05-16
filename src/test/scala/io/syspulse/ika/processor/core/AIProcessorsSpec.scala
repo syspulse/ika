@@ -1,4 +1,4 @@
-package io.syspulse.ika.processor.impl
+package io.syspulse.ika.processor.core
 
 import org.scalatest.matchers.should.Matchers
 import org.scalatest.wordspec.AnyWordSpec
@@ -16,6 +16,7 @@ import akka.actor.ActorSystem
 import akka.http.scaladsl.model.HttpHeader
 import akka.util.ByteString
 import spray.json._
+import io.syspulse.ika.processor.core.MetaProcessor
 
 class AIProcessorsSpec extends AnyWordSpec with Matchers {
 
