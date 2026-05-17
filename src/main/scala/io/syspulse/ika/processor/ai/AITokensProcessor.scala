@@ -40,10 +40,9 @@ class AITokensProcessor(
   override val name: String = "AITokens"
 
   private val log = Logger(name)
-  private val metadataAttrTemplate = metadataUsageAttr.map(_.trim).filter(_.nonEmpty)
   private val placeholderPattern = "\\{([^{}]+)\\}".r
   private val metadataFields: Set[String] =
-    metadataAttrTemplate
+    metadataUsageAttr.map(_.trim).filter(_.nonEmpty)
       .map(t => placeholderPattern.findAllMatchIn(t).map(_.group(1)).filter(_.nonEmpty).toSet)
       .getOrElse(Set.empty)
 
@@ -71,6 +70,12 @@ class AITokensProcessor(
         .removeData("aiMetadata")
 
       val (s1, fieldsNoMeta) = extractAndStripMetadata(s0, json)
+
+      // Push tid/pid into the Telemetry instance so all subsequent records use them.
+      s1.getData[Telemetry]("telemetry").foreach { telemetry =>
+        metadataLong(s1, "tid").foreach(telemetry.setTid)
+        metadataLong(s1, "pid").foreach(telemetry.setPid)
+      }
 
       if (fieldsNoMeta eq json.fields) {
         Future.successful(s1)
@@ -210,41 +215,18 @@ class AITokensProcessor(
       val outTok   = usage.outputTokens.getOrElse(0).toLong
       val totalTok = usage.totalTokens.getOrElse((inTok + outTok).toInt)
 
-      telemetry.getOrRegisterData("ai.tokens", new AiTokens())
-        .addTokens(target.provider, target.model, inTok, outTok)
+      val customerId =
+        session.getData[Map[String, String]]("aiMetadata").flatMap(_.get("customer_id"))
+          .orElse(session.getData[String]("customer_id"))
+          .getOrElse("")
 
-      writeMetadataUsageAttr(session, usage, target, telemetry)
+      telemetry.getOrRegisterData("ai.tokens", new AiTokens())
+        .addTokens(telemetry.tid, telemetry.pid, customerId, target.provider, target.model, inTok, outTok)
 
       val prefix = if (isSse) "SSE AI usage" else "AI usage"
       log.info(
-        s"$prefix: input=$inTok, output=$outTok, total=$totalTok (provider='${target.provider}', model='${target.model}')"
+        s"$prefix: input=$inTok, output=$outTok, total=$totalTok (provider='${target.provider}', model='${target.model}', customer_id='$customerId')"
       )
-    }
-  }
-
-  private def writeMetadataUsageAttr(session: Session, usage: Usage, target: TelemetryTarget, telemetry: Telemetry): Unit = {
-    metadataAttrTemplate.foreach { template =>
-      val metaFromBody = session.getData[Map[String, String]]("aiMetadata").getOrElse(Map.empty)
-      val metaFromHeaders = session.getData[Map[String, String]]("meta").getOrElse(Map.empty)
-      val metadata = metaFromHeaders ++ metaFromBody
-
-      if (metadata.nonEmpty && metadataFields.subsetOf(metadata.keySet)) {
-        val attrName = interpolate(template, metadata)
-          telemetry.updateUsageAttr(
-            name = attrName,
-            inputTokens = usage.inputTokens.getOrElse(0).toLong,
-            outputTokens = usage.outputTokens.getOrElse(0).toLong,
-            provider = target.provider,
-            model = target.model
-          )
-
-          log.info(
-            s"Telemetry metadata usage updated: attr='$attrName', metadata=${metadata}, input_tokens=${usage.inputTokens.getOrElse(0)}, output_tokens=${usage.outputTokens.getOrElse(0)}, provider='${target.provider}', model='${target.model}'"
-          )
-      } else if (metadata.nonEmpty) {
-        val missing = metadataFields.diff(metadata.keySet).toSeq.sorted.mkString(",")
-        log.debug(s"Skipping metadata usage attr '$template': missing metadata fields [$missing], metadata=$metadata")
-      } else ()
     }
   }
 
@@ -323,13 +305,20 @@ class AITokensProcessor(
           metaObj.fields.get(field).flatMap(metadataValueToString).map(field -> _)
         }.toMap
 
+        // Always extract tid, pid, customer_id for Telemetry even if not in the template
+        val alwaysFields = Seq("tid", "pid", "customer_id").filterNot(extracted.contains)
+        val alwaysExtracted = alwaysFields.flatMap { field =>
+          metaObj.fields.get(field).flatMap(metadataValueToString).map(field -> _)
+        }.toMap
+        val extractedWithCid = extracted ++ alwaysExtracted
+
         val s1 =
-          if (extracted.nonEmpty) s0.putData("aiMetadata", extracted)
+          if (extractedWithCid.nonEmpty) s0.putData("aiMetadata", extractedWithCid)
           else s0.removeData("aiMetadata")
 
         // Keep direct session fields for placeholders so downstream processors/tests can read them,
         // without hard-coding a particular metadata schema.
-        val s2 = extracted.foldLeft(s1) { case (acc, (field, value)) =>
+        val s2 = extractedWithCid.foldLeft(s1) { case (acc, (field, value)) =>
           value.toIntOption.map(v => acc.putData(field, v)).getOrElse(acc.putData(field, value))
         }
 
@@ -352,17 +341,17 @@ class AITokensProcessor(
     case other => Some(other.compactPrint)
   }
 
-  private def interpolate(template: String, metadata: Map[String, String]): String =
-    placeholderPattern.replaceAllIn(template, m => metadata.getOrElse(m.group(1), ""))
+  // Read a session metadata field as Long.
+  // Stored as Int when value fits (from toIntOption), otherwise as String.
+  // getData[Long] would throw ClassCastException on boxed Integer so try Int first.
+  private def metadataLong(session: Session, field: String): Option[Long] =
+    session.getData[Int](field).map(_.toLong)
+      .orElse(session.getData[String](field).flatMap(_.toLongOption))
+
 }
 
 object AITokensProcessor {
-  /**
-   * Create AITokensProcessor
-   */
-  def apply()(implicit ec: ExecutionContext): AITokensProcessor = {
-    new AITokensProcessor()
-  }
+  def apply()(implicit ec: ExecutionContext): AITokensProcessor = new AITokensProcessor()
 }
 
 object AITokensProcessorConfig extends ProcessorConfigurable {

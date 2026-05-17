@@ -1,5 +1,8 @@
 package io.syspulse.ika.telemetry
 
+import java.util.concurrent.atomic.AtomicLong
+import spray.json._
+
 sealed trait FieldType
 object FieldType {
   case object Counter   extends FieldType // Long (monotonically increasing)
@@ -17,10 +20,99 @@ trait TelemetryData {
   def fields: Seq[TelemetryField]
   // One map per DB row; every row always includes "ts" -> Long.
   def toRecords: Seq[Map[String, Any]]
-  // Flat key=value string map for embedding into Telemetry.toFlatKV.
+  // Flat key=value string map for embedding into Telemetry.toFlatKV (logging only).
   def toFlatKV: Map[String, String]
   // Reset fields where resetOnFlush=true. Called by Telemetry.flush() after a store write.
   def flush(): Unit
-  def toCsv: String
-  def toJson: String
+  /**
+   * True for multi-dimensional data (e.g. AiTokens) that should be serialized using
+   * toRecords/toCsvRows in file/stream output, not encoded as compound flat keys.
+   * Scalar counters and gauges return false (default) and go into the single flat row.
+   */
+  def columnar: Boolean = false
+
+  // CSV header row derived from fields schema.
+  def toCsvHeader: String = fields.map(_.name).mkString(",")
+
+  // CSV data rows derived from toRecords — same schema as the database write.
+  def toCsvRows: Seq[String] = toRecords.map { r =>
+    fields.map(f => r.getOrElse(f.name, "").toString).mkString(",")
+  }
+
+  // Full CSV (header + data rows).
+  def toCsv: String = (toCsvHeader +: toCsvRows).mkString("\n")
+
+  // JSON array of records — same structure as toRecords / DB write.
+  def toJson: String = {
+    val records = toRecords.map { r =>
+      JsObject(r.map { case (k, v) =>
+        k -> (v match {
+          case l: Long   => JsNumber(l)
+          case d: Double => JsNumber(d)
+          case s: String => JsString(s)
+          case n: Number => JsNumber(BigDecimal(n.doubleValue()))
+          case _         => JsString(v.toString)
+        })
+      }.toMap)
+    }
+    JsArray(records.toVector).compactPrint
+  }
+}
+
+// Single named counter. Processors create this and register it with Telemetry.
+// Example: TelemetryDataCounter("responses.total")
+class TelemetryDataCounter(val name: String, val resetOnFlush: Boolean = false) extends TelemetryData {
+  private val _value = new AtomicLong(0L)
+
+  def get: Long = _value.get()
+
+  override def inc(field: String, delta: Long = 1L): Unit = _value.addAndGet(delta)
+  override def set(field: String, value: Any): Unit = value match {
+    case l: Long => _value.set(l)
+    case i: Int  => _value.set(i.toLong)
+    case _       => ()
+  }
+
+  override val fields: Seq[TelemetryField] = Seq(
+    TelemetryField("ts", FieldType.Timestamp),
+    TelemetryField(name, FieldType.Counter, resetOnFlush)
+  )
+
+  override def toRecords: Seq[Map[String, Any]] = Seq(Map[String, Any](
+    "ts"  -> System.currentTimeMillis(),
+    name  -> _value.get()
+  ))
+
+  override def toFlatKV: Map[String, String] = Map(name -> _value.get().toString)
+
+  override def flush(): Unit = if (resetOnFlush) _value.set(0L)
+}
+
+// Single named gauge (point-in-time value). Gauges never reset on flush.
+// Example: TelemetryDataGauge("active.connections")
+class TelemetryDataGauge(val name: String) extends TelemetryData {
+  private val _value = new AtomicLong(0L)
+
+  def get: Long = _value.get()
+
+  override def inc(field: String, delta: Long = 1L): Unit = _value.addAndGet(delta)
+  override def set(field: String, value: Any): Unit = value match {
+    case l: Long => _value.set(l)
+    case i: Int  => _value.set(i.toLong)
+    case _       => ()
+  }
+
+  override val fields: Seq[TelemetryField] = Seq(
+    TelemetryField("ts", FieldType.Timestamp),
+    TelemetryField(name, FieldType.Gauge)  // resetOnFlush=false: gauges persist across intervals
+  )
+
+  override def toRecords: Seq[Map[String, Any]] = Seq(Map[String, Any](
+    "ts"  -> System.currentTimeMillis(),
+    name  -> _value.get()
+  ))
+
+  override def toFlatKV: Map[String, String] = Map(name -> _value.get().toString)
+
+  override def flush(): Unit = ()
 }

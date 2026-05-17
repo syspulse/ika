@@ -203,8 +203,8 @@ class ProxySseIntegrationSpec extends AnyWordSpec with Matchers with ScalaFuture
         Thread.sleep(200)
 
         val kv = telemetry.getOrRegisterData("ai.tokens", new AiTokens()).toFlatKV
-        kv.getOrElse("ai.tokens.openai.gpt-4.input", "0").toLong  shouldBe 10L
-        kv.getOrElse("ai.tokens.openai.gpt-4.output", "0").toLong shouldBe 5L
+        kv.getOrElse("ai.tokens.0.0._.openai.gpt-4.input", "0").toLong  shouldBe 10L
+        kv.getOrElse("ai.tokens.0.0._.openai.gpt-4.output", "0").toLong shouldBe 5L
 
       } finally backendBinding.unbind().futureValue
     }
@@ -259,8 +259,8 @@ class ProxySseIntegrationSpec extends AnyWordSpec with Matchers with ScalaFuture
         Thread.sleep(200)
 
         val kv = telemetry.getOrRegisterData("ai.tokens", new AiTokens()).toFlatKV
-        kv.getOrElse("ai.tokens.openai.gpt-4o-mini.input", "0").toLong  shouldBe 10L
-        kv.getOrElse("ai.tokens.openai.gpt-4o-mini.output", "0").toLong shouldBe 23L
+        kv.getOrElse("ai.tokens.0.0._.openai.gpt-4o-mini.input", "0").toLong  shouldBe 10L
+        kv.getOrElse("ai.tokens.0.0._.openai.gpt-4o-mini.output", "0").toLong shouldBe 23L
 
       } finally backendBinding.unbind().futureValue
     }

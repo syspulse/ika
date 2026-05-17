@@ -9,14 +9,26 @@ import spray.json._
 class Telemetry {
   private val log = Logger(s"${this.getClass.getSimpleName}")
 
-  private val counters      = new ConcurrentHashMap[String, AtomicLong]()
-  private val gauges        = new ConcurrentHashMap[String, AtomicLong]()
-  private val histogramSum  = new ConcurrentHashMap[String, AtomicLong]()
-  private val histogramCount= new ConcurrentHashMap[String, AtomicLong]()
-  private val attributes    = new ConcurrentHashMap[String, AtomicReference[JsValue]]()
+  // Tenant and pipeline identifiers — set dynamically from request metadata.
+  // AtomicLong allows concurrent writes without synchronisation.
+  private val _tid = new AtomicLong(0L)
+  private val _pid = new AtomicLong(0L)
 
-  // Registry of named TelemetryData instances (e.g. AiTokens registered as "ai.tokens").
-  private val dataRegistry  = new ConcurrentHashMap[String, TelemetryData]()
+  def tid: Long = _tid.get()
+  def pid: Long = _pid.get()
+  def setTid(v: Long): Unit = _tid.set(v)
+  def setPid(v: Long): Unit = _pid.set(v)
+
+  // Counters and gauges are TelemetryData instances in the registry.
+  // Registry key is the metric name (e.g. "responses.total", "active.connections").
+  private val dataRegistry   = new ConcurrentHashMap[String, TelemetryData]()
+
+  // Histograms keep their own maps (sum + count) — not yet wrapped as TelemetryData.
+  private val histogramSum   = new ConcurrentHashMap[String, AtomicLong]()
+  private val histogramCount = new ConcurrentHashMap[String, AtomicLong]()
+
+  // Structured metadata attributes (used for per-session usage tracking).
+  private val attributes     = new ConcurrentHashMap[String, AtomicReference[JsValue]]()
 
   private val startTime = System.currentTimeMillis()
 
@@ -29,34 +41,70 @@ class Telemetry {
   def getOrRegisterData[T <: TelemetryData](name: String, create: => T): T =
     dataRegistry.computeIfAbsent(name, _ => create).asInstanceOf[T]
 
-  /** Write all registered TelemetryData to the store, then reset resetOnFlush counters. */
+  def getAllRegisteredData: Map[String, TelemetryData] =
+    dataRegistry.asScala.toMap
+
+  /** Columnar TelemetryData (e.g. AiTokens) — serialized as structured rows, not flat KV. */
+  def getColumnarData: Iterable[TelemetryData] =
+    dataRegistry.asScala.values.filter(_.columnar)
+
+  /**
+   * Flat KV for file/stream CSV output — excludes columnar data (those appear as structured sections).
+   * Includes histograms, uptime, attributes, and scalar counters/gauges.
+   */
+  def toScalarFlatKV: Map[String, String] = {
+    val histKV: Map[String, String] =
+      getAllHistograms.flatMap { case (name, (sum, count, avg)) =>
+        Map(
+          s"${name}.sum_ms" -> sum.toString,
+          s"${name}.count"  -> count.toString,
+          s"${name}.avg_ms" -> f"$avg%.6f"
+        )
+      }
+    val registeredKV: Map[String, String] =
+      dataRegistry.asScala.values
+        .filterNot(_.columnar)
+        .foldLeft(Map.empty[String, String])(_ ++ _.toFlatKV)
+    histKV ++
+      Map("tid" -> tid.toString, "pid" -> pid.toString, "uptime.ms" -> getUptimeMs.toString) ++
+      getAllAttributes.map { case (k, v) => s"attr.$k" -> v.compactPrint } ++
+      registeredKV
+  }
+
+  /** Write registered TelemetryData to store, then reset resetOnFlush counters. */
   def flush(): Unit =
     dataRegistry.values().asScala.foreach(_.flush())
 
-  // ===== Counters =====
+  // ===== Counters (backed by TelemetryDataCounter in the registry) =====
 
   def inc(name: String): Unit =
-    counters.computeIfAbsent(name, _ => new AtomicLong(0)).incrementAndGet()
+    getOrRegisterData(name, new TelemetryDataCounter(name)).inc(name)
 
   def inc(name: String, value: Long): Unit =
-    counters.computeIfAbsent(name, _ => new AtomicLong(0)).addAndGet(value)
+    getOrRegisterData(name, new TelemetryDataCounter(name)).inc(name, value)
 
   def getCounter(name: String): Long =
-    Option(counters.get(name)).map(_.get()).getOrElse(0L)
+    Option(dataRegistry.get(name)).collect { case d: TelemetryDataCounter => d.get }.getOrElse(0L)
 
-  // ===== Gauges =====
+  def getAllCounters: Map[String, Long] =
+    dataRegistry.asScala.collect { case (_, d: TelemetryDataCounter) => d.name -> d.get }.toMap
+
+  // ===== Gauges (backed by TelemetryDataGauge in the registry) =====
 
   def setGauge(name: String, value: Long): Unit =
-    gauges.computeIfAbsent(name, _ => new AtomicLong(0)).set(value)
+    getOrRegisterData(name, new TelemetryDataGauge(name)).set(name, value)
 
   def incGauge(name: String): Unit =
-    gauges.computeIfAbsent(name, _ => new AtomicLong(0)).incrementAndGet()
+    getOrRegisterData(name, new TelemetryDataGauge(name)).inc(name)
 
   def decGauge(name: String): Unit =
-    gauges.computeIfAbsent(name, _ => new AtomicLong(0)).decrementAndGet()
+    getOrRegisterData(name, new TelemetryDataGauge(name)).inc(name, -1L)
 
   def getGauge(name: String): Long =
-    Option(gauges.get(name)).map(_.get()).getOrElse(0L)
+    Option(dataRegistry.get(name)).collect { case d: TelemetryDataGauge => d.get }.getOrElse(0L)
+
+  def getAllGauges: Map[String, Long] =
+    dataRegistry.asScala.collect { case (_, d: TelemetryDataGauge) => d.name -> d.get }.toMap
 
   // ===== Histograms / Timers =====
 
@@ -77,6 +125,13 @@ class Telemetry {
   def getTimeCount(name: String): Long =
     Option(histogramCount.get(name)).map(_.get()).getOrElse(0L)
 
+  def getAllHistograms: Map[String, (Long, Long, Double)] =
+    histogramSum.asScala.keys.map { name =>
+      val sum   = getTotalTime(name)
+      val count = getTimeCount(name)
+      name -> (sum, count, getAverageTime(name))
+    }.toMap
+
   // ===== Attributes =====
 
   def setAttr(name: String, value: JsValue): Unit =
@@ -94,7 +149,6 @@ class Telemetry {
 
   /**
    * Atomically accumulate provider/model token counts into a named attribute as nested JSON.
-   *
    * Shape: { "<provider>": { "<model>": { "input_tokens": <long>, "output_tokens": <long> } } }
    */
   def updateUsageAttr(name: String, inputTokens: Long, outputTokens: Long, provider: String, model: String): Unit = {
@@ -103,7 +157,6 @@ class Telemetry {
       case JsString(s) => s.toLongOption.getOrElse(0L)
       case _           => 0L
     }
-
     val p = Option(provider).getOrElse("").trim
     val m = Option(model).getOrElse("").trim
     if (p.isEmpty || m.isEmpty) return
@@ -122,23 +175,15 @@ class Telemetry {
     updateAttr(name) {
       case obj0: JsObject =>
         val obj = if (obj0.fields.contains("provider") || obj0.fields.contains("model")) migrateFlat(obj0) else obj0
-        val providerObj: JsObject = obj.fields.get(p) match {
-          case Some(o: JsObject) => o
-          case _                 => JsObject.empty
-        }
-        val modelObj: JsObject = providerObj.fields.get(m) match {
-          case Some(o: JsObject) => o
-          case _                 => JsObject.empty
-        }
+        val providerObj: JsObject = obj.fields.get(p) match { case Some(o: JsObject) => o; case _ => JsObject.empty }
+        val modelObj:   JsObject = providerObj.fields.get(m) match { case Some(o: JsObject) => o; case _ => JsObject.empty }
         val curIn  = modelObj.fields.get("input_tokens").map(asLong).getOrElse(0L)
         val curOut = modelObj.fields.get("output_tokens").map(asLong).getOrElse(0L)
         val updatedModelObj    = JsObject(modelObj.fields ++ Map(
           "input_tokens"  -> JsNumber(curIn  + math.max(0L, inputTokens)),
           "output_tokens" -> JsNumber(curOut + math.max(0L, outputTokens))
         ))
-        val updatedProviderObj = JsObject(providerObj.fields + (m -> updatedModelObj))
-        JsObject(obj.fields + (p -> updatedProviderObj))
-
+        JsObject(obj.fields + (p -> JsObject(providerObj.fields + (m -> updatedModelObj))))
       case _ =>
         JsObject(p -> JsObject(m -> JsObject(
           "input_tokens"  -> JsNumber(math.max(0L, inputTokens)),
@@ -159,14 +204,14 @@ class Telemetry {
 
   // ===== Convenience metrics =====
 
-  def incRequests(): Unit   = inc("requests.total")
-  def incResponses(): Unit  = inc("responses.total")
-  def incErrors(): Unit     = inc("errors.total")
-  def incTimeouts(): Unit   = inc("errors.timeout")
-  def incRetries(): Unit    = inc("retries.total")
-  def incCacheHits(): Unit  = inc("cache.hits")
-  def incCacheMisses(): Unit= inc("cache.misses")
-  def incRejections(): Unit = inc("rejections.total")
+  def incRequests(): Unit    = inc("requests.total")
+  def incResponses(): Unit   = inc("responses.total")
+  def incErrors(): Unit      = inc("errors.total")
+  def incTimeouts(): Unit    = inc("errors.timeout")
+  def incRetries(): Unit     = inc("retries.total")
+  def incCacheHits(): Unit   = inc("cache.hits")
+  def incCacheMisses(): Unit = inc("cache.misses")
+  def incRejections(): Unit  = inc("rejections.total")
 
   def addRequestBytes(bytes: Long): Unit  = if (bytes > 0) inc("requests.bytes.total", bytes)
   def addResponseBytes(bytes: Long): Unit = if (bytes > 0) inc("responses.bytes.total", bytes)
@@ -174,42 +219,27 @@ class Telemetry {
   def recordRequestTime(durationMs: Long): Unit = recordTime("request.duration", durationMs)
   def recordCacheTime(durationMs: Long): Unit   = recordTime("cache.duration", durationMs)
 
-  // ===== Snapshots =====
-
-  def getAllCounters: Map[String, Long] =
-    counters.asScala.map { case (k, v) => k -> v.get() }.toMap
-
-  def getAllGauges: Map[String, Long] =
-    gauges.asScala.map { case (k, v) => k -> v.get() }.toMap
-
-  def getAllHistograms: Map[String, (Long, Long, Double)] =
-    histogramSum.asScala.keys.map { name =>
-      val sum   = getTotalTime(name)
-      val count = getTimeCount(name)
-      val avg   = getAverageTime(name)
-      name -> (sum, count, avg)
-    }.toMap
-
   def getUptimeMs: Long = System.currentTimeMillis() - startTime
 
+  // ===== Flat KV (for logging / toString only) =====
+
   def toFlatKV: Map[String, String] = {
-    val base: Map[String, String] =
-      getAllCounters.view.mapValues(_.toString).toMap ++
-        getAllGauges.view.mapValues(_.toString).toMap ++
-        getAllHistograms.map { case (name, (sum, count, avg)) =>
-          Map(
-            s"${name}.sum_ms" -> sum.toString,
-            s"${name}.count"  -> count.toString,
-            s"${name}.avg_ms" -> f"$avg%.6f"
-          )
-        }.foldLeft(Map.empty[String, String])(_ ++ _) ++
-        Map("uptime.ms" -> getUptimeMs.toString) ++
-        getAllAttributes.map { case (k, v) => s"attr.$k" -> v.compactPrint }
+    val histKV: Map[String, String] =
+      getAllHistograms.flatMap { case (name, (sum, count, avg)) =>
+        Map(
+          s"${name}.sum_ms" -> sum.toString,
+          s"${name}.count"  -> count.toString,
+          s"${name}.avg_ms" -> f"$avg%.6f"
+        )
+      }
 
     val registeredKV: Map[String, String] =
       dataRegistry.asScala.values.foldLeft(Map.empty[String, String])(_ ++ _.toFlatKV)
 
-    base ++ registeredKV
+    histKV ++
+      Map("tid" -> tid.toString, "pid" -> pid.toString, "uptime.ms" -> getUptimeMs.toString) ++
+      getAllAttributes.map { case (k, v) => s"attr.$k" -> v.compactPrint } ++
+      registeredKV
   }
 
   override def toString: String = {
@@ -219,40 +249,50 @@ class Telemetry {
   }
 
   def reset(): Unit = {
-    counters.clear()
-    gauges.clear()
+    dataRegistry.clear()
     histogramSum.clear()
     histogramCount.clear()
     attributes.clear()
-    dataRegistry.clear()
   }
 
   def summary(): String = {
     val sb = new StringBuilder()
     sb.append(s"=== Telemetry Summary (uptime: ${getUptimeMs}ms) ===\n")
 
-    sb.append("\nCounters:\n")
-    getAllCounters.toSeq.sortBy(_._1).foreach { case (name, value) =>
-      sb.append(f"  $name%-40s: $value%,d\n")
+    val counters = getAllCounters
+    if (counters.nonEmpty) {
+      sb.append("\nCounters:\n")
+      counters.toSeq.sortBy(_._1).foreach { case (name, value) =>
+        sb.append(f"  $name%-40s: $value%,d\n")
+      }
     }
 
-    sb.append("\nGauges:\n")
-    getAllGauges.toSeq.sortBy(_._1).foreach { case (name, value) =>
-      sb.append(f"  $name%-40s: $value%,d\n")
+    val gauges = getAllGauges
+    if (gauges.nonEmpty) {
+      sb.append("\nGauges:\n")
+      gauges.toSeq.sortBy(_._1).foreach { case (name, value) =>
+        sb.append(f"  $name%-40s: $value%,d\n")
+      }
     }
 
-    sb.append("\nHistograms:\n")
-    getAllHistograms.toSeq.sortBy(_._1).foreach { case (name, (sum, count, avg)) =>
-      sb.append(f"  $name%-40s: count=$count%,d, sum=${sum}%,dms, avg=${avg}%.2fms\n")
+    val hists = getAllHistograms
+    if (hists.nonEmpty) {
+      sb.append("\nHistograms:\n")
+      hists.toSeq.sortBy(_._1).foreach { case (name, (sum, count, avg)) =>
+        sb.append(f"  $name%-40s: count=$count%,d, sum=${sum}%,dms, avg=${avg}%.2fms\n")
+      }
     }
 
-    val registered = dataRegistry.asScala
-    if (registered.nonEmpty) {
+    val otherData = dataRegistry.asScala.filter {
+      case (_, _: TelemetryDataCounter) => false
+      case (_, _: TelemetryDataGauge)   => false
+      case _                            => true
+    }
+    if (otherData.nonEmpty) {
       sb.append("\nRegistered TelemetryData:\n")
-      registered.toSeq.sortBy(_._1).foreach { case (name, data) =>
+      otherData.toSeq.sortBy(_._1).foreach { case (name, data) =>
         sb.append(s"  [$name]\n")
-        val kv = data.toFlatKV
-        kv.toSeq.sorted.foreach { case (k, v) => sb.append(f"    $k%-44s: $v\n") }
+        data.toFlatKV.toSeq.sorted.foreach { case (k, v) => sb.append(f"    $k%-44s: $v\n") }
       }
     }
 

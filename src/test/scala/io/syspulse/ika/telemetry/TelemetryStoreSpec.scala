@@ -6,35 +6,52 @@ import org.scalatest.wordspec.AnyWordSpec
 class TelemetryStoreSpec extends AnyWordSpec with Matchers {
 
   "TelemetryStore.toCsv" should {
-    "include header row when requested" in {
+    "produce a single data line (no header)" in {
       val t = new Telemetry()
       t.inc("requests.total", 10)
-      val csv = TelemetryStore.toCsv(t, withHeader = true, timestamp = "2026-05-16T00:00:00Z")
+      val csv = TelemetryStore.toCsv(t, withHeader = false)
+      csv.linesIterator.toList should have size 1
+    }
+
+    "produce header + single data line when header enabled" in {
+      val t = new Telemetry()
+      t.inc("requests.total", 10)
+      val csv = TelemetryStore.toCsv(t, withHeader = true)
       val lines = csv.linesIterator.toList
       lines should have size 2
-      lines.head should startWith("timestamp,")
+      lines.head should startWith("ts,")
       lines.head should include("requests.total")
       val headers = lines.head.split(',')
-      val values = lines(1).split(',')
+      val values  = lines(1).split(',')
       values(headers.indexOf("requests.total")) shouldBe "10"
     }
 
-    "omit header when disabled" in {
+    "include all registered counter values in one row" in {
       val t = new Telemetry()
-      t.inc("a", 1)
-      val csv = TelemetryStore.toCsv(t, withHeader = false, timestamp = "ts")
-      csv.linesIterator.toList should have size 1
-      csv should startWith("ts,1")
-      csv.split(',').length shouldBe 3 // timestamp, a, uptime.ms
+      t.inc("alpha", 1)
+      t.inc("beta",  2)
+      val csv = TelemetryStore.toCsv(t, withHeader = true)
+      val lines = csv.linesIterator.toList
+      // Always 2 lines regardless of number of data entries
+      lines should have size 2
+      lines.head should include("alpha")
+      lines.head should include("beta")
+      val headers = lines.head.split(',')
+      val values  = lines(1).split(',')
+      values(headers.indexOf("alpha")) shouldBe "1"
+      values(headers.indexOf("beta"))  shouldBe "2"
     }
   }
 
   "TelemetryStore.toJson" should {
-    "emit timestamp and metrics object" in {
+    "produce a single flat JSON object" in {
       val t = new Telemetry()
       t.inc("x", 2)
-      val json = TelemetryStore.toJson(t, timestamp = "ts")
-      json should include("\"timestamp\":\"ts\"")
+      val json = TelemetryStore.toJson(t)
+      // Single-line flat object
+      json.linesIterator.toList should have size 1
+      json should startWith("{")
+      json should include("\"ts\":")
       json should include("\"x\":\"2\"")
     }
   }

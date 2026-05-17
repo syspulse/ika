@@ -333,7 +333,7 @@ class AIProcessorsSpec extends AnyWordSpec with Matchers {
       bodyObj.fields.contains("metadata") shouldBe false
     }
 
-    "write telemetry attribute object based on metadata and token usage" in {
+    "record token usage with customer_id from metadata to AiTokens" in {
       val telemetry = Telemetry()
       val tokens = new AITokensProcessor(metadataUsageAttr = Some("{tid}-{pid}-{customer_id}"))
       val router = AIRouterProcessor(providers)
@@ -359,19 +359,21 @@ class AIProcessorsSpec extends AnyWordSpec with Matchers {
 
       Await.result(tokens.processResponse(s2.copy(responseBody = Some(ByteString(response)))), 5.seconds)
 
-      telemetry.getAttr("9-7-c-1") shouldBe Some(
-        JsObject(
-          "openai" -> JsObject(
-            "openai/gpt-4o-mini" -> JsObject(
-              "input_tokens" -> JsNumber(11),
-              "output_tokens" -> JsNumber(22)
-            )
-          )
-        )
-      )
+      telemetry.tid shouldBe 9L
+      telemetry.pid shouldBe 7L
+
+      val records = telemetry.getOrRegisterData("ai.tokens", new AiTokens()).toRecords
+      records should have size 1
+      val rec = records.head
+      rec("tid")           shouldBe 9L
+      rec("pid")           shouldBe 7L
+      rec("customer_id")   shouldBe "c-1"
+      rec("provider")      shouldBe "openai"
+      rec("input_tokens")  shouldBe 11L
+      rec("output_tokens") shouldBe 22L
     }
 
-    "extract dynamic metadata fields from metadataUsageAttr pattern" in {
+    "extract metadata fields from template and record to AiTokens" in {
       val telemetry = Telemetry()
       val tokens = new AITokensProcessor(metadataUsageAttr = Some("org-{tenant}-user-{user_id}"))
       val meta = new MetaProcessor(Seq("x-meta"))
@@ -397,19 +399,16 @@ class AIProcessorsSpec extends AnyWordSpec with Matchers {
 
       Await.result(tokens.processResponse(s2.copy(responseBody = Some(ByteString("""{ "usage": { "input_tokens": 4, "output_tokens": 6 } }""")))), 5.seconds)
 
-      telemetry.getAttr("org-acme-user-42") shouldBe Some(
-        JsObject(
-          "openai" -> JsObject(
-            "openai/gpt-4o-mini" -> JsObject(
-              "input_tokens" -> JsNumber(4),
-              "output_tokens" -> JsNumber(6)
-            )
-          )
-        )
-      )
+      val records = telemetry.getOrRegisterData("ai.tokens", new AiTokens()).toRecords
+      records should have size 1
+      val rec = records.head
+      rec("customer_id")   shouldBe ""  // no customer_id in this metadata
+      rec("provider")      shouldBe "openai"
+      rec("input_tokens")  shouldBe 4L
+      rec("output_tokens") shouldBe 6L
     }
 
-    "accumulate telemetry attribute object across multiple requests" in {
+    "accumulate AiTokens across multiple requests with same customer_id" in {
       val telemetry = Telemetry()
       val tokens = new AITokensProcessor(metadataUsageAttr = Some("{tid}-{pid}-{customer_id}"))
       val router = AIRouterProcessor(providers)
@@ -431,19 +430,21 @@ class AIProcessorsSpec extends AnyWordSpec with Matchers {
       Await.result(tokens.processResponse(s2.copy(responseBody = Some(ByteString(rsp1)))), 5.seconds)
       Await.result(tokens.processResponse(s2.copy(responseBody = Some(ByteString(rsp2)))), 5.seconds)
 
-      telemetry.getAttr("400-13-customer-1") shouldBe Some(
-        JsObject(
-          "claude" -> JsObject(
-            "claude/claude-haiku-4-5-20251001" -> JsObject(
-              "input_tokens" -> JsNumber(15),
-              "output_tokens" -> JsNumber(50)
-            )
-          )
-        )
-      )
+      telemetry.tid shouldBe 400L
+      telemetry.pid shouldBe 13L
+
+      val records = telemetry.getOrRegisterData("ai.tokens", new AiTokens()).toRecords
+      records should have size 1
+      val rec = records.head
+      rec("tid")           shouldBe 400L
+      rec("pid")           shouldBe 13L
+      rec("customer_id")   shouldBe "customer-1"
+      rec("provider")      shouldBe "claude"
+      rec("input_tokens")  shouldBe 15L
+      rec("output_tokens") shouldBe 50L
     }
 
-    "accumulate telemetry attribute object separately per provider/model under same metadata key" in {
+    "record separate AiTokens rows per provider/model for same customer_id" in {
       val telemetry = Telemetry()
       val tokens = new AITokensProcessor(metadataUsageAttr = Some("{tid}-{pid}-{customer_id}"))
 
@@ -462,29 +463,26 @@ class AIProcessorsSpec extends AnyWordSpec with Matchers {
 
       Await.result(tokens.processResponse(s1.copy(responseBody = Some(ByteString("""{ "usage": { "input_tokens": 12, "output_tokens": 51 } }""")))), 5.seconds)
 
-      // Second: openai, same metadata key
+      // Second: openai, same customer_id
       val s2 = s1
         .putData("provider", "openai")
         .putData("model", "openai/gpt-4o-mini")
 
       Await.result(tokens.processResponse(s2.copy(responseBody = Some(ByteString("""{ "usage": { "input_tokens": 36, "output_tokens": 115 } }""")))), 5.seconds)
 
-      telemetry.getAttr("400-13-customer-1") shouldBe Some(
-        JsObject(
-          "claude" -> JsObject(
-            "claude/claude-haiku-4-5-20251001" -> JsObject(
-              "input_tokens" -> JsNumber(12),
-              "output_tokens" -> JsNumber(51)
-            )
-          ),
-          "openai" -> JsObject(
-            "openai/gpt-4o-mini" -> JsObject(
-              "input_tokens" -> JsNumber(36),
-              "output_tokens" -> JsNumber(115)
-            )
-          )
-        )
-      )
+      telemetry.tid shouldBe 400L
+      telemetry.pid shouldBe 13L
+
+      val records = telemetry.getOrRegisterData("ai.tokens", new AiTokens()).toRecords
+      records should have size 2
+      records.forall(_("customer_id").toString == "customer-1") shouldBe true
+      records.forall(_("tid") == 400L) shouldBe true
+      records.forall(_("pid") == 13L) shouldBe true
+      val byProvider = records.groupBy(_("provider").toString)
+      byProvider("claude").head("input_tokens")  shouldBe 12L
+      byProvider("claude").head("output_tokens") shouldBe 51L
+      byProvider("openai").head("input_tokens")  shouldBe 36L
+      byProvider("openai").head("output_tokens") shouldBe 115L
     }
 
     "extract token usage from response" in {
@@ -565,8 +563,8 @@ class AIProcessorsSpec extends AnyWordSpec with Matchers {
       Await.result(processor.process(session), 5.seconds)
 
       val kv = telemetry.getOrRegisterData("ai.tokens", new AiTokens()).toFlatKV
-      (kv.getOrElse("ai.tokens.openai.gpt-4o-mini.input", "0").toLong +
-       kv.getOrElse("ai.tokens.openai.gpt-4o-mini.output", "0").toLong) shouldBe 50L
+      (kv.getOrElse("ai.tokens.0.0._.openai.gpt-4o-mini.input", "0").toLong +
+       kv.getOrElse("ai.tokens.0.0._.openai.gpt-4o-mini.output", "0").toLong) shouldBe 50L
     }
 
     "handle response without usage field gracefully" in {

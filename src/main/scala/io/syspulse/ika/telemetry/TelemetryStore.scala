@@ -54,34 +54,53 @@ object TelemetryStore {
       case _          => None
     }
 
-  /** Sorted metric keys for CSV (includes synthetic `timestamp` column). */
-  def csvColumns(t: Telemetry): Seq[String] = "timestamp" +: t.toFlatKV.toSeq.sortBy(_._1).map(_._1)
+  // Scalar (non-columnar) sorted KV — used by the flat CSV/JSON row.
+  // Columnar data (e.g. AiTokens) is output as separate structured sections.
+  private def flatKV(t: Telemetry): Seq[(String, String)] = t.toScalarFlatKV.toSeq.sortBy(_._1)
 
-  def csvHeaderRow(t: Telemetry): String =
-    csvColumns(t).map(csvEscape).mkString(",")
+  /** CSV header row: ts,<key1>,<key2>,... */
+  def csvHeaderRow(t: Telemetry): String = ("ts" +: flatKV(t).map(_._1)).mkString(",")
 
-  def csvDataRow(t: Telemetry, timestamp: String = nowTimestamp()): String = {
-    val kv = t.toFlatKV.toSeq.sortBy(_._1)
-    (csvEscape(timestamp) +: kv.map { case (_, v) => csvEscape(v) }).mkString(",")
+  /** CSV data row (single line, no header). */
+  def csvDataRow(t: Telemetry): String =
+    (System.currentTimeMillis().toString +: flatKV(t).map(_._2)).mkString(",")
+
+  /**
+   * CSV snapshot for file/stdout/stderr output.
+   *
+   * Produces a flat scalar row (ts + all counters/gauges/histograms) followed by one structured
+   * section per columnar TelemetryData (e.g. AiTokens) using proper field-name columns.
+   * Each columnar section: header row then one data row per dimension combination.
+   */
+  def toCsv(t: Telemetry, withHeader: Boolean): String = {
+    val flatPart = if (withHeader) s"${csvHeaderRow(t)}\n${csvDataRow(t)}" else csvDataRow(t)
+    val columnarParts = t.getColumnarData
+      .filter(_.toRecords.nonEmpty)
+      .toSeq.sortBy(_.getClass.getSimpleName)
+      .map(data => if (withHeader) data.toCsv else data.toCsvRows.mkString("\n"))
+    if (columnarParts.isEmpty) flatPart
+    else (flatPart +: columnarParts).mkString("\n")
   }
 
   /**
-   * Serialize telemetry as a single CSV record (optional header row).
+   * JSON snapshot for file/stdout/stderr output.
+   *
+   * First line: flat JSON object with scalar counters/gauges.
+   * Additional lines: one JSON array per columnar TelemetryData (NDJSON style).
    */
-  def toCsv(t: Telemetry, withHeader: Boolean, timestamp: String = nowTimestamp()): String =
-    if (withHeader) s"${csvHeaderRow(t)}\n${csvDataRow(t, timestamp)}".trim
-    else csvDataRow(t, timestamp)
-
-  /**
-   * Serialize telemetry as compact JSON (flat metrics map + timestamp).
-   */
-  def toJson(t: Telemetry, timestamp: String = nowTimestamp()): String = {
-    val fields = t.toFlatKV.toSeq.sortBy(_._1).map { case (k, v) => k -> JsString(v) }
-    JsObject("timestamp" -> JsString(timestamp), "metrics" -> JsObject(fields: _*)).compactPrint
+  def toJson(t: Telemetry): String = {
+    val scalarFields: Seq[(String, JsValue)] =
+      ("ts" -> JsNumber(System.currentTimeMillis())) +:
+        flatKV(t).map { case (k, v) => k -> JsString(v) }
+    val flatLine = JsObject(scalarFields: _*).compactPrint
+    val columnarLines = t.getColumnarData
+      .filter(_.toRecords.nonEmpty)
+      .toSeq.map(_.toJson)
+    (flatLine +: columnarLines).mkString("\n")
   }
 
   /**
-   * Format telemetry for output. No format (None) means [[Telemetry.toString]] without serialization.
+   * Format telemetry for output. No format (None) means [[Telemetry.toString]] (logging).
    */
   def formatOutput(t: Telemetry, format: Option[String], csvHeader: Boolean): String =
     format match {
@@ -92,17 +111,6 @@ object TelemetryStore {
         t.toString
       case None => t.toString
     }
-
-  private def nowTimestamp(): String =
-    java.time.Instant.now().toString
-
-  private def csvEscape(s: String): String = {
-    val v = Option(s).getOrElse("")
-    if (v.indexOf(',') >= 0 || v.indexOf('"') >= 0 || v.indexOf('\n') >= 0 || v.indexOf('\r') >= 0)
-      "\"" + v.replace("\"", "\"\"") + "\""
-    else
-      v
-  }
 
   private def splitUrlOps(uri: String): (String, Map[String, String]) =
     uri.split("[\\?&]").toList match {
