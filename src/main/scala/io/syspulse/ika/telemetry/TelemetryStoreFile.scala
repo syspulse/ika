@@ -31,6 +31,8 @@ class TelemetryStoreFile(
   val telemetry: Telemetry = Telemetry()
 
   def publish(): Unit = {
+    if (config.publishPolicy == PublishPolicy.New && !telemetry.isDirty) return
+
     val line = TelemetryStore.formatOutput(telemetry, config.format, config.csvHeader)
     config.sink match {
       case TelemetrySink.Stdout =>

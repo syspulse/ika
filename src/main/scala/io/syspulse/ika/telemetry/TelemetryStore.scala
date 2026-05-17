@@ -30,13 +30,23 @@ object TelemetrySink {
   final case class File(pattern: String) extends TelemetrySink
 }
 
+/** Controls when the store writes to its sink. */
+sealed trait PublishPolicy
+object PublishPolicy {
+  /** Write on every scheduled interval regardless of new data (default). */
+  case object Always extends PublishPolicy
+  /** Write only when new data has been produced since the last flush. */
+  case object New    extends PublishPolicy
+}
+
 final case class TelemetrySinkConfig(
   sink: TelemetrySink,
   intervalMs: Long = 60000L,
   /** None = no serialization, publish [[Telemetry.toString]] only; Some(csv|json) = serialized output */
   format: Option[String] = None,
   csvHeader: Boolean = true,
-  rotateMaxBytes: Option[Long] = None
+  rotateMaxBytes: Option[Long] = None,
+  publishPolicy: PublishPolicy = PublishPolicy.Always
 )
 
 object TelemetryStore {
@@ -148,6 +158,12 @@ object TelemetryStore {
     }
   }
 
+  private def parsePublishPolicy(ops: Map[String, String]): PublishPolicy =
+    ops.get("publish").map(_.trim.toLowerCase) match {
+      case Some("new") => PublishPolicy.New
+      case _           => PublishPolicy.Always
+    }
+
   private def parseRotate(ops: Map[String, String]): Option[Long] =
     ops.get("rotate").flatMap { r =>
       val sizeStr = if (r.contains(":")) r.split(":", 2).toList match {
@@ -176,7 +192,7 @@ object TelemetryStore {
         )
         val (format, csvHeader) = parseFormat(parts.drop(1), ops)
         val sink = if (scheme == "stderr") TelemetrySink.Stderr else TelemetrySink.Stdout
-        TelemetrySinkConfig(sink, interval, format, csvHeader, rotateMaxBytes = None)
+        TelemetrySinkConfig(sink, interval, format, csvHeader, rotateMaxBytes = None, parsePublishPolicy(ops))
 
       case "file" =>
         val filePattern = body
@@ -187,7 +203,8 @@ object TelemetryStore {
           interval,
           format,
           csvHeader,
-          rotateMaxBytes = parseRotate(ops)
+          rotateMaxBytes = parseRotate(ops),
+          publishPolicy  = parsePublishPolicy(ops)
         )
 
       case _ =>

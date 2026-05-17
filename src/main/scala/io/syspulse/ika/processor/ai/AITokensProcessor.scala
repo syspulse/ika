@@ -8,43 +8,58 @@ import akka.stream.scaladsl.{Sink, Keep, Source => AkkaSource}
 import akka.util.ByteString
 
 import io.syspulse.ika.processor.{BidirectionalProcessor, Session, Processor}
-import io.syspulse.ika.telemetry.{Telemetry, TelemetryDataId}
+import io.syspulse.ika.telemetry.{Telemetry, TelemetryDataId, TelemetryStore}
 import io.syspulse.ika.processor.util.ProcessorConfigurable
 import com.typesafe.config.{Config => TypesafeConfig}
 import akka.actor.ActorSystem
 
 /**
- * AITokensProcessor extracts token usage from AI API responses and records to telemetry.
+ * AITokensProcessor extracts token usage from AI API responses and records to its own
+ * internal TelemetryStore (separate from session Telemetry).
  *
- * This processor parses AI API responses and extracts token usage metrics.
+ * Session Telemetry (attached via session.putData("telemetry", ...)) is used only for
+ * request-level error counters. AI token metadata (tid, pid, customer_id, provider, model,
+ * input_tokens, output_tokens) is always recorded into the processor's own AiTokens instance.
  *
- * Request metadata is extracted dynamically from metadataUsageAttr placeholders.
- * For example, metadataUsageAttr="{tid}-{pid}-{customer_id}" reads fields
- * "tid", "pid", and "customer_id" from the root "metadata" object.
+ * If tokensTelemetryStore is provided the processor publishes AiTokens records to it on
+ * its configured interval. Typical URIs: "stdout://10000?format=csv",
+ * "file:///var/log/ika/ai-tokens.csv?format=csv&interval=60000".
+ *
+ * Request metadata is extracted from the comma-separated field list in metadataUsageAttr.
+ * For example, metadataUsageAttr="tid,pid,customer_id" extracts those three fields
+ * from the root "metadata" object and stores them in the session for downstream use.
  *
  * Session data written:
  * - "promptTokens" (Int) - Number of prompt tokens
  * - "completionTokens" (Int) - Number of completion tokens
  * - "totalTokens" (Int) - Total tokens used
  *
- * Telemetry metrics:
- * - Increments total tokens counter (if telemetry is available in session)
- *
  * Pipeline position:
  * [...] → AITokens (request metadata strip) → HttpClient → AITokens (response usage) → [...]
  */
 class AITokensProcessor(
-  metadataUsageAttr: Option[String] = None
+  metadataUsageAttr: Option[String] = None,
+  tokensTelemetryStore: Option[TelemetryStore] = None
 )(implicit ec: ExecutionContext) extends BidirectionalProcessor {
 
   override val name: String = "AITokens"
 
   private val log = Logger(name)
-  private val placeholderPattern = "\\{([^{}]+)\\}".r
   private val metadataFields: Set[String] =
     metadataUsageAttr.map(_.trim).filter(_.nonEmpty)
-      .map(t => placeholderPattern.findAllMatchIn(t).map(_.group(1)).filter(_.nonEmpty).toSet)
+      .map(_.split(",").map(_.trim).filter(_.nonEmpty).toSet)
       .getOrElse(Set.empty)
+
+  // Owned AiTokens instance — accumulates token usage across all requests.
+  val aiTokens: AiTokens = new AiTokens()
+
+  // Register aiTokens into the store's Telemetry so it is published on each interval.
+  tokensTelemetryStore.foreach { store =>
+    store.telemetry.registerData("ai.tokens", aiTokens)
+    store.start()
+  }
+
+  def stop(): Unit = tokensTelemetryStore.foreach(_.stop())
 
   private case class Usage(inputTokens: Option[Int], outputTokens: Option[Int], totalTokens: Option[Int]) {
     def hasTokens: Boolean = inputTokens.exists(_ > 0) || outputTokens.exists(_ > 0) || totalTokens.exists(_ > 0)
@@ -71,9 +86,9 @@ class AITokensProcessor(
 
       val (s1, fieldsNoMeta) = extractAndStripMetadata(s0, json)
 
-      // Register tid/pid as static identifier fields so they appear in telemetry output.
-      s1.getData[Telemetry]("telemetry").foreach { telemetry =>
-        val ids = telemetry.getOrRegisterData("ai.ids", new TelemetryDataId())
+      // Register tid/pid into the internal store's Telemetry as static ID fields.
+      tokensTelemetryStore.foreach { store =>
+        val ids = store.telemetry.getOrRegisterData("ai.ids", new TelemetryDataId())
         metadataLong(s1, "tid").foreach(ids.setLong("tid", _))
         metadataLong(s1, "pid").foreach(ids.setLong("pid", _))
       }
@@ -86,7 +101,6 @@ class AITokensProcessor(
       }
     } catch {
       case _: spray.json.JsonParser.ParsingException =>
-        // If request isn't JSON (or streaming-esque), do nothing; router/http may handle/reject later.
         Future.successful(session)
       case e: Exception =>
         log.warn(s"Failed to process request metadata: ${e.getMessage}", e)
@@ -102,11 +116,9 @@ class AITokensProcessor(
     }
   }
 
-  private def isErrorResponse(json: JsObject): Boolean = {
-    // OpenAI-style: {"error": {...}} or sometimes {"object":"error", ...}
+  private def isErrorResponse(json: JsObject): Boolean =
     json.fields.contains("error") ||
       json.fields.get("object").contains(JsString("error"))
-  }
 
   // SSE state accumulated per stream chunk
   private case class SseState(buffer: String, usage: Usage, responseModel: Option[String])
@@ -114,7 +126,6 @@ class AITokensProcessor(
   private def parseSseChunk(state: SseState, chunk: ByteString): SseState = {
     val combined = state.buffer + chunk.utf8String
     val events = combined.split("\n\n")
-    // Last element may be incomplete — keep it in the buffer
     val complete = if (combined.endsWith("\n\n")) events else events.dropRight(1)
     val remaining = if (combined.endsWith("\n\n")) "" else events.lastOption.getOrElse("")
 
@@ -139,11 +150,7 @@ class AITokensProcessor(
     recordUsage(session, state.usage, isSse = true, responseModel = state.responseModel)
   }
 
-  /**
-   * Process response - extract token usage and add to telemetry
-   */
   override def processResponse(session: Session): Future[Session] = {
-    // Streaming SSE path: tap the stream without buffering
     if (session.isStreaming) {
       session.responseStream match {
         case Some(stream) =>
@@ -164,89 +171,73 @@ class AITokensProcessor(
           Future.successful(session)
       }
     } else {
-    // Buffered (non-streaming) path
-    session.responseBody match {
-      case Some(responseBody) =>
-        try {
-          // Parse response body as JSON
-          val json = responseBody.utf8String.parseJson.asJsObject
+      session.responseBody match {
+        case Some(responseBody) =>
+          try {
+            val json = responseBody.utf8String.parseJson.asJsObject
 
-          if (isErrorResponse(json)) {
-            // Provider returned an error payload
-            incAiError(session, "response_error")
-          }
+            if (isErrorResponse(json)) incAiError(session, "response_error")
 
-          // Extract usage field from normal responses or response.completed-style payloads.
-          extractUsage(json) match {
-            case Some(usage) =>
-              val updatedSession = putUsageData(session, usage)
-              recordUsage(session, usage, isSse = false, responseModel = extractResponseModel(json))
-              Future.successful(updatedSession)
+            extractUsage(json) match {
+              case Some(usage) =>
+                val updatedSession = putUsageData(session, usage)
+                recordUsage(session, usage, isSse = false, responseModel = extractResponseModel(json))
+                Future.successful(updatedSession)
 
-            case None =>
-              log.warn("No usage field in response (possibly streaming or error response)")
-              // If it's a JSON response (not streaming) and not an explicit error payload, count as extraction error.
-              if (!isErrorResponse(json)) incAiError(session, "usage_missing")
+              case None =>
+                log.warn("No usage field in response (possibly streaming or error response)")
+                if (!isErrorResponse(json)) incAiError(session, "usage_missing")
+                Future.successful(session)
+            }
+          } catch {
+            case e: spray.json.JsonParser.ParsingException =>
+              log.warn(s"Response is not valid JSON (possibly streaming): ${e.getMessage}")
+              Future.successful(session)
+
+            case e: Exception =>
+              log.warn(s"Failed to extract token usage: ${e.getMessage}", e)
+              incAiError(session, "extract_exception")
               Future.successful(session)
           }
-        } catch {
-          case e: spray.json.JsonParser.ParsingException =>
-            log.warn(s"Response is not valid JSON (possibly streaming): ${e.getMessage}")
-            // Not an error - streaming responses aren't JSON
-            Future.successful(session)
 
-          case e: Exception =>
-            log.warn(s"Failed to extract token usage: ${e.getMessage}", e)
-            incAiError(session, "extract_exception")
-            Future.successful(session)
-        }
-
-      case None =>
-        log.warn("No response body to extract tokens from")
-        incAiError(session, "empty_response")
-        Future.successful(session)
+        case None =>
+          log.warn("No response body to extract tokens from")
+          incAiError(session, "empty_response")
+          Future.successful(session)
+      }
     }
-    } // end else (non-streaming)
   }
 
   private def recordUsage(session: Session, usage: Usage, isSse: Boolean, responseModel: Option[String]): Unit = {
-    session.getData[Telemetry]("telemetry").foreach { telemetry =>
-      val target   = telemetryTarget(session, responseModel)
-      val inTok    = usage.inputTokens.getOrElse(0).toLong
-      val outTok   = usage.outputTokens.getOrElse(0).toLong
-      val totalTok = usage.totalTokens.getOrElse((inTok + outTok).toInt)
+    val target   = telemetryTarget(session, responseModel)
+    val inTok    = usage.inputTokens.getOrElse(0).toLong
+    val outTok   = usage.outputTokens.getOrElse(0).toLong
+    val totalTok = usage.totalTokens.getOrElse((inTok + outTok).toInt)
 
-      val customerId =
-        session.getData[Map[String, String]]("aiMetadata").flatMap(_.get("customer_id"))
-          .orElse(session.getData[String]("customer_id"))
-          .getOrElse("")
+    val customerId =
+      session.getData[Map[String, String]]("aiMetadata").flatMap(_.get("customer_id"))
+        .orElse(session.getData[String]("customer_id"))
+        .getOrElse("")
 
-      val tid = metadataLong(session, "tid").getOrElse(0L)
-      val pid = metadataLong(session, "pid").getOrElse(0L)
+    val tid = metadataLong(session, "tid").getOrElse(0L)
+    val pid = metadataLong(session, "pid").getOrElse(0L)
 
-      telemetry.getOrRegisterData("ai.tokens", new AiTokens())
-        .addTokens(tid, pid, customerId, target.provider, target.model, inTok, outTok)
+    aiTokens.addTokens(tid, pid, customerId, target.provider, target.model, inTok, outTok)
 
-      val prefix = if (isSse) "SSE AI usage" else "AI usage"
-      log.info(
-        s"$prefix: input=$inTok, output=$outTok, total=$totalTok (provider='${target.provider}', model='${target.model}', customer_id='$customerId')"
-      )
-    }
+    val prefix = if (isSse) "SSE AI usage" else "AI usage"
+    log.info(
+      s"$prefix: input=$inTok, output=$outTok, total=$totalTok (provider='${target.provider}', model='${target.model}', customer_id='$customerId')"
+    )
   }
 
-  /**
-   * Extract integer field from JSON object
-   */
-  private def extractIntField(obj: JsObject, fieldName: String): Option[Int] = {
+  private def extractIntField(obj: JsObject, fieldName: String): Option[Int] =
     obj.fields.get(fieldName) match {
       case Some(JsNumber(value)) => Some(value.toInt)
       case Some(other) =>
         log.warn(s"Field $fieldName is not a number: $other")
         None
-      case None =>
-        None
+      case None => None
     }
-  }
 
   private def extractUsage(json: JsObject): Option[Usage] =
     extractUsageObject(json).map { usageObj =>
@@ -309,20 +300,11 @@ class AITokensProcessor(
           metaObj.fields.get(field).flatMap(metadataValueToString).map(field -> _)
         }.toMap
 
-        // Always extract tid, pid, customer_id for Telemetry even if not in the template
-        val alwaysFields = Seq("tid", "pid", "customer_id").filterNot(extracted.contains)
-        val alwaysExtracted = alwaysFields.flatMap { field =>
-          metaObj.fields.get(field).flatMap(metadataValueToString).map(field -> _)
-        }.toMap
-        val extractedWithCid = extracted ++ alwaysExtracted
-
         val s1 =
-          if (extractedWithCid.nonEmpty) s0.putData("aiMetadata", extractedWithCid)
+          if (extracted.nonEmpty) s0.putData("aiMetadata", extracted)
           else s0.removeData("aiMetadata")
 
-        // Keep direct session fields for placeholders so downstream processors/tests can read them,
-        // without hard-coding a particular metadata schema.
-        val s2 = extractedWithCid.foldLeft(s1) { case (acc, (field, value)) =>
+        val s2 = extracted.foldLeft(s1) { case (acc, (field, value)) =>
           value.toIntOption.map(v => acc.putData(field, v)).getOrElse(acc.putData(field, value))
         }
 
@@ -345,9 +327,8 @@ class AITokensProcessor(
     case other => Some(other.compactPrint)
   }
 
-  // Read a session metadata field as Long.
   // Stored as Int when value fits (from toIntOption), otherwise as String.
-  // getData[Long] would throw ClassCastException on boxed Integer so try Int first.
+  // getData[Long] on a boxed Integer throws ClassCastException so try Int first.
   private def metadataLong(session: Session, field: String): Option[Long] =
     session.getData[Int](field).map(_.toLong)
       .orElse(session.getData[String](field).flatMap(_.toLongOption))
@@ -361,8 +342,16 @@ object AITokensProcessor {
 object AITokensProcessorConfig extends ProcessorConfigurable {
   override val tpe: String = "ai_token"
 
-  override def fromConfig(id: String, cfg: TypesafeConfig)(implicit ec: ExecutionContext, actorSystem: ActorSystem): Seq[Processor] =
+  override def fromConfig(id: String, cfg: TypesafeConfig)(implicit ec: ExecutionContext, actorSystem: ActorSystem): Seq[Processor] = {
+    val store = if (cfg.hasPath("telemetry")) {
+      val rawUri = cfg.getString("telemetry")
+      // Default to publish=new for AiTokens store: only write when token data was produced.
+      val uri = if (!rawUri.contains("publish=")) rawUri + (if (rawUri.contains("?")) "&" else "?") + "publish=new" else rawUri
+      Some(TelemetryStore.fromUri(uri))
+    } else None
     Seq(new AITokensProcessor(
-      metadataUsageAttr = if (cfg.hasPath("metadataUsageAttr")) Some(cfg.getString("metadataUsageAttr")) else None
+      metadataUsageAttr    = if (cfg.hasPath("metadataUsageAttr")) Some(cfg.getString("metadataUsageAttr")) else None,
+      tokensTelemetryStore = store
     ))
+  }
 }

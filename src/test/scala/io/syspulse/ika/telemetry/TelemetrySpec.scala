@@ -73,6 +73,15 @@ class TelemetrySpec extends AnyWordSpec with Matchers {
       rec("output_tokens") shouldBe 5L
     }
 
+    "be dirty after addTokens and clean after flush" in {
+      val a = new AiTokens()
+      a.isDirty shouldBe false
+      a.addTokens(0L, 0L, "", "openai", "gpt-4o", 5, 3)
+      a.isDirty shouldBe true
+      a.flush()
+      a.isDirty shouldBe false
+    }
+
     "expose correct fields schema" in {
       val a = new AiTokens()
       val resetFields = a.fields.filter(_.resetOnFlush).map(_.name)

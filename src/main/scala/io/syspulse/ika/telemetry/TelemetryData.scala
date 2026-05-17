@@ -25,6 +25,12 @@ trait TelemetryData {
   // Reset fields where resetOnFlush=true. Called by Telemetry.flush() after a store write.
   def flush(): Unit
   /**
+   * True when new data has been recorded since the last flush.
+   * Default is true (always dirty) so scalar counters/gauges publish on every interval.
+   * Override with actual tracking in types that support publish=new semantics (e.g. AiTokens).
+   */
+  def isDirty: Boolean = true
+  /**
    * True for multi-dimensional data (e.g. AiTokens) that should be serialized using
    * toRecords/toCsvRows in file/stream output, not encoded as compound flat keys.
    * Scalar counters and gauges return false (default) and go into the single flat row.
@@ -121,6 +127,9 @@ class TelemetryDataId extends TelemetryData {
     values.asScala.map { case (k, v) => k -> v.toString }.toMap
 
   override def flush(): Unit = ()
+
+  // Static IDs are set-once; they never constitute "new data" for publish=new purposes.
+  override def isDirty: Boolean = false
 }
 
 // Single named gauge (point-in-time value). Gauges never reset on flush.

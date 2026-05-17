@@ -61,6 +61,9 @@ class Telemetry {
       registeredKV
   }
 
+  /** True when any registered TelemetryData has new data since the last flush. */
+  def isDirty: Boolean = dataRegistry.asScala.values.exists(_.isDirty)
+
   /** Write registered TelemetryData to store, then reset resetOnFlush counters. */
   def flush(): Unit =
     dataRegistry.values().asScala.foreach(_.flush())

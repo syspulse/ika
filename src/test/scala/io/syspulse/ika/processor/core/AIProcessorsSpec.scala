@@ -9,7 +9,7 @@ import scala.io.Source
 import com.typesafe.config.ConfigFactory
 
 import io.syspulse.ika.processor.Session
-import io.syspulse.ika.telemetry.{Telemetry, TelemetryDataId}
+import io.syspulse.ika.telemetry.Telemetry
 import io.syspulse.ika.processor.ai.{AIRouterProcessor, AITokensProcessor, AiTokens}
 import akka.actor.ActorSystem
 import akka.http.scaladsl.model.HttpHeader
@@ -314,7 +314,7 @@ class AIProcessorsSpec extends AnyWordSpec with Matchers {
 
   "AITokensProcessor" should {
     "extract and strip metadata from request payload" in {
-      val processor = new AITokensProcessor(metadataUsageAttr = Some("{tid}-{pid}-{customer_id}"))
+      val processor = new AITokensProcessor(metadataUsageAttr = Some("tid,pid,customer_id"))
       val request =
         """{
           |  "metadata": { "pid": 7, "tid": 9, "customer_id": "c-1" },
@@ -335,7 +335,7 @@ class AIProcessorsSpec extends AnyWordSpec with Matchers {
 
     "record token usage with customer_id from metadata to AiTokens" in {
       val telemetry = Telemetry()
-      val tokens = new AITokensProcessor(metadataUsageAttr = Some("{tid}-{pid}-{customer_id}"))
+      val tokens = new AITokensProcessor(metadataUsageAttr = Some("tid,pid,customer_id"))
       val router = AIRouterProcessor(providers)
 
       val request =
@@ -359,11 +359,7 @@ class AIProcessorsSpec extends AnyWordSpec with Matchers {
 
       Await.result(tokens.processResponse(s2.copy(responseBody = Some(ByteString(response)))), 5.seconds)
 
-      val ids = telemetry.getOrRegisterData("ai.ids", new TelemetryDataId())
-      ids.getLong("tid") shouldBe Some(9L)
-      ids.getLong("pid") shouldBe Some(7L)
-
-      val records = telemetry.getOrRegisterData("ai.tokens", new AiTokens()).toRecords
+      val records = tokens.aiTokens.toRecords
       records should have size 1
       val rec = records.head
       rec("tid")           shouldBe 9L
@@ -376,7 +372,7 @@ class AIProcessorsSpec extends AnyWordSpec with Matchers {
 
     "extract metadata fields from template and record to AiTokens" in {
       val telemetry = Telemetry()
-      val tokens = new AITokensProcessor(metadataUsageAttr = Some("org-{tenant}-user-{user_id}"))
+      val tokens = new AITokensProcessor(metadataUsageAttr = Some("tenant,user_id"))
       val meta = new MetaProcessor(Seq("x-meta"))
 
       val request =
@@ -400,7 +396,7 @@ class AIProcessorsSpec extends AnyWordSpec with Matchers {
 
       Await.result(tokens.processResponse(s2.copy(responseBody = Some(ByteString("""{ "usage": { "input_tokens": 4, "output_tokens": 6 } }""")))), 5.seconds)
 
-      val records = telemetry.getOrRegisterData("ai.tokens", new AiTokens()).toRecords
+      val records = tokens.aiTokens.toRecords
       records should have size 1
       val rec = records.head
       rec("customer_id")   shouldBe ""  // no customer_id in this metadata
@@ -411,7 +407,7 @@ class AIProcessorsSpec extends AnyWordSpec with Matchers {
 
     "accumulate AiTokens across multiple requests with same customer_id" in {
       val telemetry = Telemetry()
-      val tokens = new AITokensProcessor(metadataUsageAttr = Some("{tid}-{pid}-{customer_id}"))
+      val tokens = new AITokensProcessor(metadataUsageAttr = Some("tid,pid,customer_id"))
       val router = AIRouterProcessor(providers)
 
       val request =
@@ -431,11 +427,7 @@ class AIProcessorsSpec extends AnyWordSpec with Matchers {
       Await.result(tokens.processResponse(s2.copy(responseBody = Some(ByteString(rsp1)))), 5.seconds)
       Await.result(tokens.processResponse(s2.copy(responseBody = Some(ByteString(rsp2)))), 5.seconds)
 
-      val ids = telemetry.getOrRegisterData("ai.ids", new TelemetryDataId())
-      ids.getLong("tid") shouldBe Some(400L)
-      ids.getLong("pid") shouldBe Some(13L)
-
-      val records = telemetry.getOrRegisterData("ai.tokens", new AiTokens()).toRecords
+      val records = tokens.aiTokens.toRecords
       records should have size 1
       val rec = records.head
       rec("tid")           shouldBe 400L
@@ -448,7 +440,7 @@ class AIProcessorsSpec extends AnyWordSpec with Matchers {
 
     "record separate AiTokens rows per provider/model for same customer_id" in {
       val telemetry = Telemetry()
-      val tokens = new AITokensProcessor(metadataUsageAttr = Some("{tid}-{pid}-{customer_id}"))
+      val tokens = new AITokensProcessor(metadataUsageAttr = Some("tid,pid,customer_id"))
 
       val request =
         """{
@@ -472,11 +464,7 @@ class AIProcessorsSpec extends AnyWordSpec with Matchers {
 
       Await.result(tokens.processResponse(s2.copy(responseBody = Some(ByteString("""{ "usage": { "input_tokens": 36, "output_tokens": 115 } }""")))), 5.seconds)
 
-      val ids = telemetry.getOrRegisterData("ai.ids", new TelemetryDataId())
-      ids.getLong("tid") shouldBe Some(400L)
-      ids.getLong("pid") shouldBe Some(13L)
-
-      val records = telemetry.getOrRegisterData("ai.tokens", new AiTokens()).toRecords
+      val records = tokens.aiTokens.toRecords
       records should have size 2
       records.forall(_("customer_id").toString == "customer-1") shouldBe true
       records.forall(_("tid") == 400L) shouldBe true
@@ -565,7 +553,7 @@ class AIProcessorsSpec extends AnyWordSpec with Matchers {
 
       Await.result(processor.process(session), 5.seconds)
 
-      val kv = telemetry.getOrRegisterData("ai.tokens", new AiTokens()).toFlatKV
+      val kv = processor.aiTokens.toFlatKV
       (kv.getOrElse("ai.tokens.0.0._.openai.gpt-4o-mini.input", "0").toLong +
        kv.getOrElse("ai.tokens.0.0._.openai.gpt-4o-mini.output", "0").toLong) shouldBe 50L
     }

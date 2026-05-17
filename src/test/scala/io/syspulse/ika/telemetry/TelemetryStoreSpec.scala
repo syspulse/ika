@@ -132,5 +132,20 @@ class TelemetryStoreSpec extends AnyWordSpec with Matchers {
       c.format shouldBe Some("csv")
       c.csvHeader shouldBe false
     }
+
+    "parse publish=new for stdout" in {
+      val c = TelemetryStore.parseUri("stdout://10000?format=csv&publish=new")
+      c.publishPolicy shouldBe PublishPolicy.New
+    }
+
+    "parse publish=always for file" in {
+      val c = TelemetryStore.parseUri("file:///tmp/t.csv?format=csv&publish=always")
+      c.publishPolicy shouldBe PublishPolicy.Always
+    }
+
+    "default publish=always when not specified" in {
+      val c = TelemetryStore.parseUri("stdout://10000?format=csv")
+      c.publishPolicy shouldBe PublishPolicy.Always
+    }
   }
 }

@@ -1,7 +1,7 @@
 package io.syspulse.ika.processor.ai
 
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.{AtomicLong, AtomicBoolean}
 import scala.jdk.CollectionConverters._
 
 import io.syspulse.ika.telemetry.{TelemetryData, TelemetryField, FieldType}
@@ -18,6 +18,9 @@ class AiTokenPair {
 
 class AiTokens extends TelemetryData {
   private val tokenMap = new ConcurrentHashMap[AiTokenKey, AiTokenPair]()
+  private val _dirty   = new AtomicBoolean(false)
+
+  override def isDirty: Boolean = _dirty.get()
 
   def addTokens(tid: Long, pid: Long, customerId: String, provider: String, model: String, inputTokens: Long, outputTokens: Long): Unit = {
     val p = Option(provider).getOrElse("").trim
@@ -29,6 +32,7 @@ class AiTokens extends TelemetryData {
     if (outputTokens > 0) pair.output.addAndGet(outputTokens)
     val t = math.max(0L, inputTokens) + math.max(0L, outputTokens)
     if (t > 0) pair.total.addAndGet(t)
+    _dirty.set(true)
   }
 
   def incErrors(tid: Long, pid: Long, customerId: String, provider: String, model: String): Unit = {
@@ -82,13 +86,15 @@ class AiTokens extends TelemetryData {
       )
     }.toMap
 
-  override def flush(): Unit =
+  override def flush(): Unit = {
     tokenMap.asScala.foreach { case (_, pair) =>
       pair.input.set(0L)
       pair.output.set(0L)
       pair.errors.set(0L)
       // total is NOT reset — it tracks lifetime usage
     }
+    _dirty.set(false)
+  }
 
   override def toString: String =
     toFlatKV.toSeq.sorted.map { case (k, v) => s"$k=$v" }.mkString(",")

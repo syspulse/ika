@@ -202,7 +202,7 @@ class ProxySseIntegrationSpec extends AnyWordSpec with Matchers with ScalaFuture
         // Allow the async telemetry callback to fire
         Thread.sleep(200)
 
-        val kv = telemetry.getOrRegisterData("ai.tokens", new AiTokens()).toFlatKV
+        val kv = aiTokens.aiTokens.toFlatKV
         kv.getOrElse("ai.tokens.0.0._.openai.gpt-4.input", "0").toLong  shouldBe 10L
         kv.getOrElse("ai.tokens.0.0._.openai.gpt-4.output", "0").toLong shouldBe 5L
 
@@ -232,9 +232,10 @@ class ProxySseIntegrationSpec extends AnyWordSpec with Matchers with ScalaFuture
         val backendUrl = s"http://${backendBinding.localAddress.getHostString}:${backendBinding.localAddress.getPort}/"
 
         val telemetry = new Telemetry()
+        val aiProc = new AITokensProcessor()(ec)
         val pipeline = ProcessorPipeline.fromSeq(
           Seq(
-            new AITokensProcessor()(ec),
+            aiProc,
             PoolProcessor.roundRobin(Seq(backendUrl)),
             new RetryProcessor(maxRetries = 0, delayMs = 0L),
             new HttpProcessor()
@@ -258,7 +259,7 @@ class ProxySseIntegrationSpec extends AnyWordSpec with Matchers with ScalaFuture
 
         Thread.sleep(200)
 
-        val kv = telemetry.getOrRegisterData("ai.tokens", new AiTokens()).toFlatKV
+        val kv = aiProc.aiTokens.toFlatKV
         kv.getOrElse("ai.tokens.0.0._.openai.gpt-4o-mini.input", "0").toLong  shouldBe 10L
         kv.getOrElse("ai.tokens.0.0._.openai.gpt-4o-mini.output", "0").toLong shouldBe 23L
 
