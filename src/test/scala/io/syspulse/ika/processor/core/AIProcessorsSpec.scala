@@ -10,8 +10,7 @@ import com.typesafe.config.ConfigFactory
 
 import io.syspulse.ika.processor.Session
 import io.syspulse.ika.telemetry.Telemetry
-import io.syspulse.ika.processor.ai.AIRouterProcessor
-import io.syspulse.ika.processor.ai.AITokensProcessor
+import io.syspulse.ika.processor.ai.{AIRouterProcessor, AITokensProcessor, AiTokens}
 import akka.actor.ActorSystem
 import akka.http.scaladsl.model.HttpHeader
 import akka.util.ByteString
@@ -565,11 +564,9 @@ class AIProcessorsSpec extends AnyWordSpec with Matchers {
 
       Await.result(processor.process(session), 5.seconds)
 
-      telemetry.getAiTokens
-        .get("openai")
-        .flatMap(_.get("openai/gpt-4o-mini"))
-        .map { case (inTok, outTok) => inTok + outTok }
-        .getOrElse(0L) shouldBe 50L
+      val kv = telemetry.getOrRegisterData("ai.tokens", new AiTokens()).toFlatKV
+      (kv.getOrElse("ai.tokens.openai.gpt-4o-mini.input", "0").toLong +
+       kv.getOrElse("ai.tokens.openai.gpt-4o-mini.output", "0").toLong) shouldBe 50L
     }
 
     "handle response without usage field gracefully" in {

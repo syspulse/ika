@@ -45,6 +45,7 @@ class TelemetryStoreFile(
             log.error(s"File sink not initialized for pattern: ${pattern}")
         }
     }
+    telemetry.flush()
   }
 
   private def writeToFile(sink: RotatingFileSink, defaultLine: String): Unit =

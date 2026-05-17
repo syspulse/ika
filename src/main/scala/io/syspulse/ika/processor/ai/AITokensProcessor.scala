@@ -205,17 +205,13 @@ class AITokensProcessor(
 
   private def recordUsage(session: Session, usage: Usage, isSse: Boolean, responseModel: Option[String]): Unit = {
     session.getData[Telemetry]("telemetry").foreach { telemetry =>
-      val target = telemetryTarget(session, responseModel)
-      val inTok = usage.inputTokens.getOrElse(0).toLong
-      val outTok = usage.outputTokens.getOrElse(0).toLong
+      val target   = telemetryTarget(session, responseModel)
+      val inTok    = usage.inputTokens.getOrElse(0).toLong
+      val outTok   = usage.outputTokens.getOrElse(0).toLong
       val totalTok = usage.totalTokens.getOrElse((inTok + outTok).toInt)
 
-      telemetry.addAiTokens(
-        provider = target.provider,
-        model = target.model,
-        inputTokens = inTok,
-        outputTokens = outTok
-      )
+      telemetry.getOrRegisterData("ai.tokens", new AiTokens())
+        .addTokens(target.provider, target.model, inTok, outTok)
 
       writeMetadataUsageAttr(session, usage, target, telemetry)
 

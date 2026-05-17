@@ -18,7 +18,7 @@ import akka.stream.scaladsl.{Sink, Source}
 import akka.util.ByteString
 
 import io.syspulse.ika.processor.ProcessorPipeline
-import io.syspulse.ika.processor.ai.AITokensProcessor
+import io.syspulse.ika.processor.ai.{AITokensProcessor, AiTokens}
 import io.syspulse.ika.processor.core.{HeaderProcessor, HttpProcessor, PoolProcessor, RetryProcessor}
 import io.syspulse.ika.store.ProxyStorePipeline
 import io.syspulse.ika.telemetry.Telemetry
@@ -202,10 +202,9 @@ class ProxySseIntegrationSpec extends AnyWordSpec with Matchers with ScalaFuture
         // Allow the async telemetry callback to fire
         Thread.sleep(200)
 
-        val tokens = telemetry.getAiTokens
-        val (inputTok, outputTok) = tokens.getOrElse("openai", Map.empty).getOrElse("gpt-4", (0L, 0L))
-        inputTok  shouldBe 10L
-        outputTok shouldBe 5L
+        val kv = telemetry.getOrRegisterData("ai.tokens", new AiTokens()).toFlatKV
+        kv.getOrElse("ai.tokens.openai.gpt-4.input", "0").toLong  shouldBe 10L
+        kv.getOrElse("ai.tokens.openai.gpt-4.output", "0").toLong shouldBe 5L
 
       } finally backendBinding.unbind().futureValue
     }
@@ -259,10 +258,9 @@ class ProxySseIntegrationSpec extends AnyWordSpec with Matchers with ScalaFuture
 
         Thread.sleep(200)
 
-        val tokens = telemetry.getAiTokens
-        val (inputTok, outputTok) = tokens.getOrElse("openai", Map.empty).getOrElse("gpt-4o-mini", (0L, 0L))
-        inputTok  shouldBe 10L
-        outputTok shouldBe 23L
+        val kv = telemetry.getOrRegisterData("ai.tokens", new AiTokens()).toFlatKV
+        kv.getOrElse("ai.tokens.openai.gpt-4o-mini.input", "0").toLong  shouldBe 10L
+        kv.getOrElse("ai.tokens.openai.gpt-4o-mini.output", "0").toLong shouldBe 23L
 
       } finally backendBinding.unbind().futureValue
     }

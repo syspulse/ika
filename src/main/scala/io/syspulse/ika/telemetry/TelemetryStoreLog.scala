@@ -22,5 +22,6 @@ class TelemetryStoreLog(
       case "ERROR" => log.error(line)
       case _       => log.info(line)
     }
+    telemetry.flush()
   }
 }
