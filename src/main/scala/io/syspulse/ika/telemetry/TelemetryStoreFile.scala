@@ -51,18 +51,20 @@ class TelemetryStoreFile(
   private def writeToFile(sink: RotatingFileSink, defaultLine: String): Unit =
     config.format match {
       case Some(TelemetryStore.FormatCsv) =>
+        val columnarData = telemetry.getColumnarData.filter(_.toRecords.nonEmpty).toSeq
         val needsHdr = config.csvHeader && sink.needsHeader()
-        if (needsHdr) {
-          sink.writeLine(TelemetryStore.csvHeaderRow(telemetry))
-          // Write columnar section headers once per file (same lifecycle as scalar header)
-          telemetry.getColumnarData.filter(_.toRecords.nonEmpty).foreach { data =>
-            sink.writeLine(data.toCsvHeader)
+        if (columnarData.nonEmpty) {
+          if (needsHdr) {
+            columnarData.foreach(data => sink.writeLine(data.toCsvHeader))
+            sink.markHeaderWritten()
           }
-          sink.markHeaderWritten()
-        }
-        sink.writeLine(TelemetryStore.csvDataRow(telemetry))
-        telemetry.getColumnarData.filter(_.toRecords.nonEmpty).foreach { data =>
-          data.toCsvRows.foreach(sink.writeLine)
+          columnarData.foreach(_.toCsvRows.foreach(sink.writeLine))
+        } else {
+          if (needsHdr) {
+            sink.writeLine(TelemetryStore.csvHeaderRow(telemetry))
+            sink.markHeaderWritten()
+          }
+          sink.writeLine(TelemetryStore.csvDataRow(telemetry))
         }
       case _ =>
         sink.writeLine(defaultLine)

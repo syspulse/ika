@@ -88,6 +88,41 @@ class TelemetryDataCounter(val name: String, val resetOnFlush: Boolean = false) 
   override def flush(): Unit = if (resetOnFlush) _value.set(0L)
 }
 
+/**
+ * Holds static Long identifier fields registered by processors (e.g. tid, pid from AI request metadata).
+ * Non-columnar: values appear in the flat scalar CSV/logging row via toFlatKV.
+ * Not reset on flush — identifiers are set once per request context and remain until overwritten.
+ */
+class TelemetryDataId extends TelemetryData {
+  import java.util.concurrent.ConcurrentHashMap
+  import scala.jdk.CollectionConverters._
+
+  private val values = new ConcurrentHashMap[String, Long]()
+
+  def setLong(field: String, v: Long): Unit = values.put(field, v)
+  def getLong(field: String): Option[Long]  = Option(values.get(field))
+
+  override val columnar: Boolean = false
+
+  override def inc(field: String, delta: Long = 1L): Unit = ()
+  override def set(field: String, value: Any): Unit = value match {
+    case l: Long   => values.put(field, l)
+    case i: Int    => values.put(field, i.toLong)
+    case s: String => s.toLongOption.foreach(values.put(field, _))
+    case _         => ()
+  }
+
+  override def fields: Seq[TelemetryField] =
+    values.asScala.keys.map(k => TelemetryField(k, FieldType.Id)).toSeq
+
+  override def toRecords: Seq[Map[String, Any]] = Seq.empty
+
+  override def toFlatKV: Map[String, String] =
+    values.asScala.map { case (k, v) => k -> v.toString }.toMap
+
+  override def flush(): Unit = ()
+}
+
 // Single named gauge (point-in-time value). Gauges never reset on flush.
 // Example: TelemetryDataGauge("active.connections")
 class TelemetryDataGauge(val name: String) extends TelemetryData {

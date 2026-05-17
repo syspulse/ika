@@ -8,7 +8,7 @@ import akka.stream.scaladsl.{Sink, Keep, Source => AkkaSource}
 import akka.util.ByteString
 
 import io.syspulse.ika.processor.{BidirectionalProcessor, Session, Processor}
-import io.syspulse.ika.telemetry.Telemetry
+import io.syspulse.ika.telemetry.{Telemetry, TelemetryDataId}
 import io.syspulse.ika.processor.util.ProcessorConfigurable
 import com.typesafe.config.{Config => TypesafeConfig}
 import akka.actor.ActorSystem
@@ -71,10 +71,11 @@ class AITokensProcessor(
 
       val (s1, fieldsNoMeta) = extractAndStripMetadata(s0, json)
 
-      // Push tid/pid into the Telemetry instance so all subsequent records use them.
+      // Register tid/pid as static identifier fields so they appear in telemetry output.
       s1.getData[Telemetry]("telemetry").foreach { telemetry =>
-        metadataLong(s1, "tid").foreach(telemetry.setTid)
-        metadataLong(s1, "pid").foreach(telemetry.setPid)
+        val ids = telemetry.getOrRegisterData("ai.ids", new TelemetryDataId())
+        metadataLong(s1, "tid").foreach(ids.setLong("tid", _))
+        metadataLong(s1, "pid").foreach(ids.setLong("pid", _))
       }
 
       if (fieldsNoMeta eq json.fields) {
@@ -220,8 +221,11 @@ class AITokensProcessor(
           .orElse(session.getData[String]("customer_id"))
           .getOrElse("")
 
+      val tid = metadataLong(session, "tid").getOrElse(0L)
+      val pid = metadataLong(session, "pid").getOrElse(0L)
+
       telemetry.getOrRegisterData("ai.tokens", new AiTokens())
-        .addTokens(telemetry.tid, telemetry.pid, customerId, target.provider, target.model, inTok, outTok)
+        .addTokens(tid, pid, customerId, target.provider, target.model, inTok, outTok)
 
       val prefix = if (isSse) "SSE AI usage" else "AI usage"
       log.info(

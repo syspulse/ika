@@ -9,16 +9,6 @@ import spray.json._
 class Telemetry {
   private val log = Logger(s"${this.getClass.getSimpleName}")
 
-  // Tenant and pipeline identifiers — set dynamically from request metadata.
-  // AtomicLong allows concurrent writes without synchronisation.
-  private val _tid = new AtomicLong(0L)
-  private val _pid = new AtomicLong(0L)
-
-  def tid: Long = _tid.get()
-  def pid: Long = _pid.get()
-  def setTid(v: Long): Unit = _tid.set(v)
-  def setPid(v: Long): Unit = _pid.set(v)
-
   // Counters and gauges are TelemetryData instances in the registry.
   // Registry key is the metric name (e.g. "responses.total", "active.connections").
   private val dataRegistry   = new ConcurrentHashMap[String, TelemetryData]()
@@ -66,7 +56,7 @@ class Telemetry {
         .filterNot(_.columnar)
         .foldLeft(Map.empty[String, String])(_ ++ _.toFlatKV)
     histKV ++
-      Map("tid" -> tid.toString, "pid" -> pid.toString, "uptime.ms" -> getUptimeMs.toString) ++
+      Map("uptime.ms" -> getUptimeMs.toString) ++
       getAllAttributes.map { case (k, v) => s"attr.$k" -> v.compactPrint } ++
       registeredKV
   }
@@ -237,7 +227,7 @@ class Telemetry {
       dataRegistry.asScala.values.foldLeft(Map.empty[String, String])(_ ++ _.toFlatKV)
 
     histKV ++
-      Map("tid" -> tid.toString, "pid" -> pid.toString, "uptime.ms" -> getUptimeMs.toString) ++
+      Map("uptime.ms" -> getUptimeMs.toString) ++
       getAllAttributes.map { case (k, v) => s"attr.$k" -> v.compactPrint } ++
       registeredKV
   }

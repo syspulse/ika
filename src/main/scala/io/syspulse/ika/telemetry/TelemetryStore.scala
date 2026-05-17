@@ -73,13 +73,11 @@ object TelemetryStore {
    * Each columnar section: header row then one data row per dimension combination.
    */
   def toCsv(t: Telemetry, withHeader: Boolean): String = {
-    val flatPart = if (withHeader) s"${csvHeaderRow(t)}\n${csvDataRow(t)}" else csvDataRow(t)
-    val columnarParts = t.getColumnarData
-      .filter(_.toRecords.nonEmpty)
-      .toSeq.sortBy(_.getClass.getSimpleName)
-      .map(data => if (withHeader) data.toCsv else data.toCsvRows.mkString("\n"))
-    if (columnarParts.isEmpty) flatPart
-    else (flatPart +: columnarParts).mkString("\n")
+    val columnarData = t.getColumnarData.filter(_.toRecords.nonEmpty).toSeq.sortBy(_.getClass.getSimpleName)
+    if (columnarData.nonEmpty)
+      columnarData.map(data => if (withHeader) data.toCsv else data.toCsvRows.mkString("\n")).mkString("\n")
+    else
+      if (withHeader) s"${csvHeaderRow(t)}\n${csvDataRow(t)}" else csvDataRow(t)
   }
 
   /**

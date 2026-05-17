@@ -9,7 +9,7 @@ import scala.io.Source
 import com.typesafe.config.ConfigFactory
 
 import io.syspulse.ika.processor.Session
-import io.syspulse.ika.telemetry.Telemetry
+import io.syspulse.ika.telemetry.{Telemetry, TelemetryDataId}
 import io.syspulse.ika.processor.ai.{AIRouterProcessor, AITokensProcessor, AiTokens}
 import akka.actor.ActorSystem
 import akka.http.scaladsl.model.HttpHeader
@@ -359,8 +359,9 @@ class AIProcessorsSpec extends AnyWordSpec with Matchers {
 
       Await.result(tokens.processResponse(s2.copy(responseBody = Some(ByteString(response)))), 5.seconds)
 
-      telemetry.tid shouldBe 9L
-      telemetry.pid shouldBe 7L
+      val ids = telemetry.getOrRegisterData("ai.ids", new TelemetryDataId())
+      ids.getLong("tid") shouldBe Some(9L)
+      ids.getLong("pid") shouldBe Some(7L)
 
       val records = telemetry.getOrRegisterData("ai.tokens", new AiTokens()).toRecords
       records should have size 1
@@ -430,8 +431,9 @@ class AIProcessorsSpec extends AnyWordSpec with Matchers {
       Await.result(tokens.processResponse(s2.copy(responseBody = Some(ByteString(rsp1)))), 5.seconds)
       Await.result(tokens.processResponse(s2.copy(responseBody = Some(ByteString(rsp2)))), 5.seconds)
 
-      telemetry.tid shouldBe 400L
-      telemetry.pid shouldBe 13L
+      val ids = telemetry.getOrRegisterData("ai.ids", new TelemetryDataId())
+      ids.getLong("tid") shouldBe Some(400L)
+      ids.getLong("pid") shouldBe Some(13L)
 
       val records = telemetry.getOrRegisterData("ai.tokens", new AiTokens()).toRecords
       records should have size 1
@@ -470,8 +472,9 @@ class AIProcessorsSpec extends AnyWordSpec with Matchers {
 
       Await.result(tokens.processResponse(s2.copy(responseBody = Some(ByteString("""{ "usage": { "input_tokens": 36, "output_tokens": 115 } }""")))), 5.seconds)
 
-      telemetry.tid shouldBe 400L
-      telemetry.pid shouldBe 13L
+      val ids = telemetry.getOrRegisterData("ai.ids", new TelemetryDataId())
+      ids.getLong("tid") shouldBe Some(400L)
+      ids.getLong("pid") shouldBe Some(13L)
 
       val records = telemetry.getOrRegisterData("ai.tokens", new AiTokens()).toRecords
       records should have size 2
