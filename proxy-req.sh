@@ -35,6 +35,8 @@ METHOD="${METHOD:-GET}"
 CONTENT_TYPE="${CONTENT_TYPE:-application/json}"
 BODY="$*"
 
+>&2 echo "PROXY: $PROXY"
+
 curl -S -s -v -D /dev/stderr \
   --proto '=http' --proto-redir '=http' \
   --proxy "$PROXY" \

@@ -59,7 +59,7 @@ object App extends skel.Server {
 
         ArgString('d', "datastore",s"Datastore [none://,rpc://,pipeline://,pipeline://web3,pipeline://simple] (def: ${d.datastore})"),
         ArgString('_', "profile",s"Pipeline profile (def: ${d.profile})"),
-        ArgString('_', "telemetry",s"Telemetry [stdout://60, stdout://60:detailed, prometheus://, log://info] (def: ${d.telemetry})"),
+        ArgString('_', "telemetry",s"Telemetry [stdout://60000, stdout://10000?format=csv, file:///metrics-{yyyy}-{MM}-{dd}.csv?format=json, prometheus://, log://info] (def: ${d.telemetry})"),
 
         ArgString('_', "api.key",s"API key suffix (def: ${d.apiKey})"),        
         

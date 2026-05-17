@@ -363,6 +363,15 @@ class Telemetry {
   }
 
   /**
+   * Compact single-line representation for logging and default telemetry output.
+   */
+  override def toString: String = {
+    val timestamp = java.time.Instant.now().toString
+    val kv = toFlatKV.toSeq.sortBy(_._1).map { case (k, v) => s"$k=$v" }.mkString(",")
+    s"[$timestamp] $kv"
+  }
+
+  /**
    * Reset all metrics (useful for testing)
    */
   def reset(): Unit = {

@@ -1,29 +1,26 @@
 package io.syspulse.ika.telemetry
 
-import scala.concurrent.{Future, ExecutionContext}
-import scala.concurrent.duration._
 import com.typesafe.scalalogging.Logger
-import akka.actor.ActorSystem
 
 /**
- * LogStore writes metrics to application logs
+ * LogStore writes metrics to application logs (toString by default, or csv/json).
  */
 class TelemetryStoreLog(
-  level: String = "INFO"  // "DEBUG", "INFO", "WARN"
+  level: String = "INFO",
+  config: TelemetrySinkConfig = TelemetrySinkConfig(TelemetrySink.Stdout)
 ) extends TelemetryStore {
 
-  private val log = Logger(s"${this.getClass.getSimpleName}")
+  private val log = Logger(getClass.getSimpleName)
 
-  // Create and own the telemetry instance
   val telemetry: Telemetry = Telemetry()
 
   def publish(): Unit = {
-    val summary = telemetry.summary()
-
+    val line = TelemetryStore.formatOutput(telemetry, config.format, config.csvHeader)
     level.toUpperCase match {
-      case "DEBUG" => log.debug(s"\n$summary")
-      case "WARN" => log.warn(s"\n$summary")
-      case "INFO" | _ => log.info(s"\n$summary")
+      case "DEBUG" => log.debug(line)
+      case "WARN"  => log.warn(line)
+      case "ERROR" => log.error(line)
+      case _       => log.info(line)
     }
   }
 }
