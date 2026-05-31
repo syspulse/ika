@@ -50,8 +50,7 @@ class AITokensProcessor(
       .map(_.split(",").map(_.trim).filter(_.nonEmpty).toSet)
       .getOrElse(Set.empty)
 
-  // Owned AiTokens instance — accumulates token usage across all requests.
-  val aiTokens: AiTokens = new AiTokens()
+  val aiTokens: TelemetryDataAiTokens = new TelemetryDataAiTokens()
 
   // Register aiTokens into the store's Telemetry so it is published on each interval.
   tokensTelemetryStore.foreach { store =>

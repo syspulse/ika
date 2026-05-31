@@ -56,17 +56,17 @@ lazy val dockerBuildxSettings = Seq(
 
 val dockerRegistryLocal = Seq(
   dockerRepository := Some("$AWS_ACCOUNT.dkr.ecr.${AWS_REGION}.amazonaws.com"),
-  dockerUsername := Some("haas"),
+  dockerUsername := Some("syspulse"),
   // this fixes stupid idea of adding registry in publishLocal 
   dockerAlias := DockerAlias(registryHost=None,username = dockerUsername.value, name = name.value, tag = Some(version.value))
 )
 
 val dockerRegistryDockerHub = Seq(
-  dockerUsername := Some("haas")
+  dockerUsername := Some("syspulse")
 )
 
 val sharedConfigDocker = Seq(
-  maintainer := "Dev0 <dev0@haas.io>",
+  maintainer := "Dev0 <dev0@syspulse.io>",
 
   // openjdk:8-jre-alpine - NOT WORKING ON RP4+ (arm64). Crashes JVM in kubernetes
   // dockerBaseImage := "openjdk:8u212-jre-alpine3.9", //"openjdk:8-jre-alpine",
@@ -79,12 +79,12 @@ val sharedConfigDocker = Seq(
 
   // Add S3 mount options
   // Requires running docker: 
-  // --privileged -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -e S3_BUCKET=haas-data-dev
+  // --privileged -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -e S3_BUCKET=syspulse-data-dev
   bashScriptExtraDefines += """/mount-s3.sh""",
   // bashScriptExtraDefines += """ls -l /mnt/s3/""",
   
   dockerUpdateLatest := true,
-  dockerUsername := Some("haas"),
+  dockerUsername := Some("syspulse"),
   dockerExposedVolumes := Seq(s"${appDockerRoot}/logs",s"${appDockerRoot}/conf",s"${appDockerRoot}/data","/data"),
   //dockerRepository := "docker.io",
   dockerExposedPorts := Seq(8080),
@@ -294,7 +294,7 @@ val sharedConfigAssemblySpark = Seq(
   assembly / test := {}
 )
 
-def appDockerConfig(appName:String,appMainClass:String) = 
+def appDockerConfig(appName:String,appMainClass:String,appConfigs:Seq[String]=Seq.empty) = {  
   Seq(
     name := appName,
 
@@ -303,11 +303,15 @@ def appDockerConfig(appName:String,appMainClass:String) =
     Compile / mainClass := Some(appMainClass), // <-- This is very important for DockerPlugin generated stage1 script!
     assembly / assemblyJarName := jarPrefix + appName + "-" + "assembly" + "-"+  appVersion + ".jar",
 
+    Universal / mappings ++= {
+      appConfigs.map(c => (file(baseDirectory.value.getAbsolutePath+"/conf/"+c), "conf/"+c))
+    },
     Universal / mappings += file(baseDirectory.value.getAbsolutePath+"/conf/application.conf") -> "conf/application.conf",
     Universal / mappings += file(baseDirectory.value.getAbsolutePath+"/conf/logback.xml") -> "conf/logback.xml",
     bashScriptExtraDefines += s"""addJava "-Dconfig.file=${appDockerRoot}/conf/application.conf"""",
-    bashScriptExtraDefines += s"""addJava "-Dlogback.configurationFile=${appDockerRoot}/conf/logback.xml"""",   
-  )
+    bashScriptExtraDefines += s"""addJava "-Dlogback.configurationFile=${appDockerRoot}/conf/logback.xml"""",           
+  ) 
+}
 
 def appAssemblyConfig(appName:String,appMainClass:String) = 
   Seq(
@@ -339,7 +343,7 @@ lazy val ika = (project in file("."))
     sharedConfigDocker,
     dockerBuildxSettings,
 
-    appDockerConfig("ika","io.syspulse.ika.App"),
+    appDockerConfig("ika","io.syspulse.ika.App",Seq("application-dev.conf")),
     appVersionConfig(),
 
     libraryDependencies ++= libSkel ++ Seq(  

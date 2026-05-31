@@ -235,11 +235,12 @@ class Telemetry {
       registeredKV
   }
 
-  override def toString: String = {
-    val timestamp = java.time.Instant.now().toString
-    val kv = toFlatKV.toSeq.sortBy(_._1).map { case (k, v) => s"$k=$v" }.mkString(",")
-    s"[$timestamp] $kv"
-  }
+  /** Flat "k=v,k=v" rendering without a leading timestamp. */
+  def toKVString: String =
+    toFlatKV.toSeq.sortBy(_._1).map { case (k, v) => s"$k=$v" }.mkString(",")
+
+  override def toString: String =
+    s"[${java.time.Instant.now().toString}] ${toKVString}"
 
   def reset(): Unit = {
     dataRegistry.clear()

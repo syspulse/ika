@@ -3,7 +3,7 @@ package io.syspulse.ika.telemetry
 import org.scalatest.matchers.should.Matchers
 import org.scalatest.wordspec.AnyWordSpec
 
-import io.syspulse.ika.processor.ai.AiTokens
+import io.syspulse.ika.processor.ai.TelemetryDataAiTokens
 
 class TelemetryStoreSpec extends AnyWordSpec with Matchers {
 
@@ -31,7 +31,7 @@ class TelemetryStoreSpec extends AnyWordSpec with Matchers {
     "produce only columnar rows (no flat scalar row) when columnar data is present" in {
       val t = new Telemetry()
       t.inc("requests.total", 5)
-      val aiTokens = new AiTokens()
+      val aiTokens = new TelemetryDataAiTokens()
       t.registerData("ai.tokens", aiTokens)
       aiTokens.addTokens(1L, 2L, "acme", "openai", "gpt-4o", 10, 5)
       val csv = TelemetryStore.toCsv(t, withHeader = false)

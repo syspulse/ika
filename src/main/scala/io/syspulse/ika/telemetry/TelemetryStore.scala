@@ -1,6 +1,7 @@
 package io.syspulse.ika.telemetry
 
 import scala.concurrent.ExecutionContext
+import scala.concurrent.duration._
 import scala.util.Try
 import com.typesafe.scalalogging.Logger
 import akka.actor.ActorSystem
@@ -9,18 +10,50 @@ import spray.json._
 /**
  * TelemetryStore manages telemetry collection and publishing to external systems.
  *
- * The store owns a Telemetry instance and handles periodic publishing.
+ * The store owns a Telemetry instance and a periodic scheduler. On [[start]] it schedules
+ * [[publish]] at fixed [[intervalMs]] (the same mechanism every store shares); on [[stop]]
+ * it cancels the scheduler. Subclasses hook resource setup/teardown via [[onStart]]/[[onStop]]
+ * and define [[publish]] / [[intervalMs]].
  *
  * Implementations:
  * - TelemetryStoreFile: stdout://, stderr://, file:// (toString by default, or csv/json)
  * - TelemetryStorePrometheus: Prometheus text exposition
  * - TelemetryStoreLog: application logs
  */
-trait TelemetryStore {
+abstract class TelemetryStore(implicit actorSystem: ActorSystem, ec: ExecutionContext) {
+  private val schedulerLog = Logger("TelemetryStore")
+  private var scheduler: Option[akka.actor.Cancellable] = None
+
   def telemetry: Telemetry
   def publish(): Unit
-  def start(): Unit = {}
-  def stop(): Unit = {}
+
+  /** Publish interval in milliseconds; values <= 0 disable scheduled publishing. */
+  protected def intervalMs: Long = TelemetryStore.DefaultIntervalMs
+
+  /** Subclass resource setup, run before the scheduler starts (e.g. open files). */
+  protected def onStart(): Unit = {}
+
+  /** Subclass resource teardown, run after the scheduler is cancelled (e.g. close files). */
+  protected def onStop(): Unit = {}
+
+  def start(): Unit = {
+    onStart()
+    if (intervalMs > 0 && scheduler.isEmpty) {
+      scheduler = Some(
+        actorSystem.scheduler.scheduleAtFixedRate(
+          initialDelay = intervalMs.millis,
+          interval = intervalMs.millis
+        )(() => publish())
+      )
+      schedulerLog.info(s"${getClass.getSimpleName} publishing every ${intervalMs}ms")
+    }
+  }
+
+  def stop(): Unit = {
+    scheduler.foreach(_.cancel())
+    scheduler = None
+    onStop()
+  }
 }
 
 sealed trait TelemetrySink
@@ -46,7 +79,9 @@ final case class TelemetrySinkConfig(
   format: Option[String] = None,
   csvHeader: Boolean = true,
   rotateMaxBytes: Option[Long] = None,
-  publishPolicy: PublishPolicy = PublishPolicy.Always
+  publishPolicy: PublishPolicy = PublishPolicy.Always,
+  /** Prepend a timestamp to toString output. Defaults off for log:// (the logger adds one). */
+  timestamp: Boolean = true
 )
 
 object TelemetryStore {
@@ -108,16 +143,17 @@ object TelemetryStore {
   }
 
   /**
-   * Format telemetry for output. No format (None) means [[Telemetry.toString]] (logging).
+   * Format telemetry for output. No format (None) means flat "k=v" rendering, with a leading
+   * `[timestamp]` only when `timestamp` is true (CSV/JSON carry their own `ts` column).
    */
-  def formatOutput(t: Telemetry, format: Option[String], csvHeader: Boolean): String =
+  def formatOutput(t: Telemetry, format: Option[String], csvHeader: Boolean, timestamp: Boolean = true): String =
     format match {
       case Some(FormatCsv)  => toCsv(t, csvHeader)
       case Some(FormatJson) => toJson(t)
       case Some(other) =>
         log.warn(s"Unsupported telemetry format '${other}', using toString()")
-        t.toString
-      case None => t.toString
+        if (timestamp) t.toString else t.toKVString
+      case None => if (timestamp) t.toString else t.toKVString
     }
 
   private def splitUrlOps(uri: String): (String, Map[String, String]) =
@@ -158,6 +194,13 @@ object TelemetryStore {
     }
   }
 
+  /** `?timestamp=` or `?ts=` (true/false/1/0/yes/no); `default` applies when neither is present. */
+  private def parseTimestamp(ops: Map[String, String], default: Boolean): Boolean =
+    ops.get("timestamp").orElse(ops.get("ts")) match {
+      case Some(v) => parseBool(v, default)
+      case None    => default
+    }
+
   private def parsePublishPolicy(ops: Map[String, String]): PublishPolicy =
     ops.get("publish").map(_.trim.toLowerCase) match {
       case Some("new") => PublishPolicy.New
@@ -192,7 +235,12 @@ object TelemetryStore {
         )
         val (format, csvHeader) = parseFormat(parts.drop(1), ops)
         val sink = if (scheme == "stderr") TelemetrySink.Stderr else TelemetrySink.Stdout
-        TelemetrySinkConfig(sink, interval, format, csvHeader, rotateMaxBytes = None, parsePublishPolicy(ops))
+        TelemetrySinkConfig(
+          sink, interval, format, csvHeader,
+          rotateMaxBytes = None,
+          publishPolicy  = parsePublishPolicy(ops),
+          timestamp      = parseTimestamp(ops, default = true)
+        )
 
       case "file" =>
         val filePattern = body
@@ -204,7 +252,8 @@ object TelemetryStore {
           format,
           csvHeader,
           rotateMaxBytes = parseRotate(ops),
-          publishPolicy  = parsePublishPolicy(ops)
+          publishPolicy  = parsePublishPolicy(ops),
+          timestamp      = parseTimestamp(ops, default = true)
         )
 
       case _ =>
@@ -235,15 +284,27 @@ object TelemetryStore {
     val scheme = url.substring(0, idx).toLowerCase
     val body = url.substring(idx + 3)
 
+    val interval = ops.get("interval").flatMap(s => Try(s.toLong).toOption).getOrElse(DefaultIntervalMs)
+
     scheme match {
       case "prometheus" =>
-        new TelemetryStorePrometheus()
+        new TelemetryStorePrometheus(interval)
 
       case "log" =>
-        val level = body.split(":").headOption.map(_.trim).filter(_.nonEmpty).getOrElse("info")
-        val bodyParts = body.split(":").drop(1).toList.map(_.trim).filter(_.nonEmpty)
-        val (format, csvHeader) = parseFormat(bodyParts, ops)
-        val cfg = TelemetrySinkConfig(TelemetrySink.Stdout, DefaultIntervalMs, format, csvHeader)
+        // Body tokens (':'-separated) may carry, in any order: a log level, a numeric
+        // interval (ms), and a format. e.g. log://1000, log://info, log://info:1000:json
+        val tokens = body.split(":").toList.map(_.trim).filter(_.nonEmpty)
+        val levels = Set("trace", "debug", "info", "warn", "error")
+        val isNumeric = (t: String) => t.nonEmpty && t.forall(_.isDigit)
+        val logInterval = tokens.find(isNumeric).flatMap(s => Try(s.toLong).toOption).getOrElse(interval)
+        val level = tokens.find(t => levels.contains(t.toLowerCase)).getOrElse("info")
+        val fmtTokens = tokens.filterNot(t => isNumeric(t) || levels.contains(t.toLowerCase))
+        val (format, csvHeader) = parseFormat(fmtTokens, ops)
+        val cfg = TelemetrySinkConfig(
+          TelemetrySink.Stdout, logInterval, format, csvHeader,
+          publishPolicy = parsePublishPolicy(ops),
+          timestamp     = parseTimestamp(ops, default = false)
+        )
         new TelemetryStoreLog(level, cfg)
 
       case "stdout" | "stderr" | "file" =>

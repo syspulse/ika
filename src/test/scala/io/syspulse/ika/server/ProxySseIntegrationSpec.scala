@@ -18,7 +18,7 @@ import akka.stream.scaladsl.{Sink, Source}
 import akka.util.ByteString
 
 import io.syspulse.ika.processor.ProcessorPipeline
-import io.syspulse.ika.processor.ai.{AITokensProcessor, AiTokens}
+import io.syspulse.ika.processor.ai.{AITokensProcessor, TelemetryDataAiTokens}
 import io.syspulse.ika.processor.core.{HeaderProcessor, HttpProcessor, PoolProcessor, RetryProcessor}
 import io.syspulse.ika.store.ProxyStorePipeline
 import io.syspulse.ika.telemetry.Telemetry

@@ -4,7 +4,6 @@ import java.io.{BufferedWriter, FileWriter}
 import java.nio.file.Files
 
 import scala.concurrent.ExecutionContext
-import scala.concurrent.duration._
 import scala.util.{Failure, Success, Try}
 
 import akka.actor.ActorSystem
@@ -25,15 +24,16 @@ class TelemetryStoreFile(
     extends TelemetryStore {
 
   private val log = Logger(getClass.getSimpleName)
-  private var scheduler: Option[akka.actor.Cancellable] = None
   private var fileSink: Option[RotatingFileSink] = None
 
   val telemetry: Telemetry = Telemetry()
 
+  override protected def intervalMs: Long = config.intervalMs
+
   def publish(): Unit = {
     if (config.publishPolicy == PublishPolicy.New && !telemetry.isDirty) return
 
-    val line = TelemetryStore.formatOutput(telemetry, config.format, config.csvHeader)
+    val line = TelemetryStore.formatOutput(telemetry, config.format, config.csvHeader, config.timestamp)
     config.sink match {
       case TelemetrySink.Stdout =>
         Console.out.println(line)
@@ -72,7 +72,7 @@ class TelemetryStoreFile(
         sink.writeLine(defaultLine)
     }
 
-  override def start(): Unit = {
+  override protected def onStart(): Unit =
     config.sink match {
       case TelemetrySink.File(pattern) =>
         fileSink = Some(new RotatingFileSink(pattern, config.rotateMaxBytes))
@@ -80,19 +80,7 @@ class TelemetryStoreFile(
         ()
     }
 
-    if (config.intervalMs > 0 && scheduler.isEmpty) {
-      scheduler = Some(
-        actorSystem.scheduler.scheduleAtFixedRate(
-          initialDelay = config.intervalMs.millis,
-          interval = config.intervalMs.millis
-        )(() => publish())
-      )
-    }
-  }
-
-  override def stop(): Unit = {
-    scheduler.foreach(_.cancel())
-    scheduler = None
+  override protected def onStop(): Unit = {
     fileSink.foreach(_.close())
     fileSink = None
     log.info("Stopped TelemetryStoreFile")

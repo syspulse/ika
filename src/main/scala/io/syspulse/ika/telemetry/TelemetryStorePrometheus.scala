@@ -1,7 +1,6 @@
 package io.syspulse.ika.telemetry
 
-import scala.concurrent.{Future, ExecutionContext}
-import scala.concurrent.duration._
+import scala.concurrent.ExecutionContext
 import com.typesafe.scalalogging.Logger
 import akka.actor.ActorSystem
 
@@ -9,7 +8,9 @@ import akka.actor.ActorSystem
  * PrometheusStore exposes metrics in Prometheus format.
  *
  * Metrics are exposed via HTTP endpoint (typically /metrics) that Prometheus
- * can scrape. The format follows Prometheus text exposition format.
+ * can scrape. The format follows Prometheus text exposition format. Counters are
+ * never reset, so the scheduled [[publish]] only refreshes the snapshot for scraping
+ * (it does not flush). Set `intervalMs <= 0` to rely purely on scrape pull.
  *
  * Example output:
  * # TYPE requests_total counter
@@ -17,9 +18,13 @@ import akka.actor.ActorSystem
  * # TYPE cache_hits counter
  * cache_hits 890
  */
-class TelemetryStorePrometheus extends TelemetryStore {
+class TelemetryStorePrometheus(
+  intervalMsCfg: Long = TelemetryStore.DefaultIntervalMs
+)(implicit actorSystem: ActorSystem, ec: ExecutionContext) extends TelemetryStore {
 
   private val log = Logger(s"${this.getClass.getSimpleName}")
+
+  override protected def intervalMs: Long = intervalMsCfg
 
   // Create and own the telemetry instance
   val telemetry: Telemetry = Telemetry()

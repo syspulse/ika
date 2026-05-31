@@ -10,7 +10,7 @@ import com.typesafe.config.ConfigFactory
 
 import io.syspulse.ika.processor.Session
 import io.syspulse.ika.telemetry.Telemetry
-import io.syspulse.ika.processor.ai.{AIRouterProcessor, AITokensProcessor, AiTokens}
+import io.syspulse.ika.processor.ai.{AIRouterProcessor, AITokensProcessor, TelemetryDataAiTokens}
 import akka.actor.ActorSystem
 import akka.http.scaladsl.model.HttpHeader
 import akka.util.ByteString
