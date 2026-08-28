@@ -167,7 +167,7 @@ class CacheProcessor(
         }
 
       case None =>
-        log.debug(s"Could not generate cache key: ${session}")
+        log.warn(s"Cache: SKIP: no cache key (size=${session.requestBody.size})")
         Future.successful(session)
     }
   }
@@ -175,8 +175,7 @@ class CacheProcessor(
   /**
    * Check cache for existing response
    */
-  protected def checkCache(session: Session, cacheKey: String): Future[Session] = {    
-
+  protected def checkCache(session: Session, cacheKey: String): Future[Session] = {
     cache.get(cacheKey) match {
       case Some(entry) =>
         val now = System.currentTimeMillis()
@@ -185,7 +184,7 @@ class CacheProcessor(
         if (now - entry.ts < entryTTL) {
           // Cache hit - return early, skip remaining processors
           recordCacheHit(session)
-          log.info(s"Req([${session.requestBody.size}]) <-- Cache($cacheKey)")
+          log.info(s"Req([${session.requestBody.size}]) <-- Cache([${entry.response.size}],$cacheKey)")
 
           Future.successful(session
             .withResponse(entry.response, ResponseSource.CACHE)
@@ -198,7 +197,7 @@ class CacheProcessor(
           // Expired - remove and miss
           cache.remove(cacheKey)
           recordCacheMiss(session)
-          log.debug(s"Cache: MISS (expired): $cacheKey")
+          log.debug(s"Cache: MISS (expired): Cache([${entry.response.size}],$cacheKey)")
 
           Future.successful(session.putData("cacheKey", cacheKey).putData("fromCache", false))
         }
@@ -246,7 +245,7 @@ class CacheProcessor(
   protected def storeInCache(session: Session, cacheKey: String, response: ByteString): Future[Session] = {
     val now = System.currentTimeMillis()
     cache.put(cacheKey, CacheEntry(now, response))
-    log.info(s"Cache: STORE: $cacheKey")
+    log.debug(s"Cache: STORE: $cacheKey")
     Future.successful(session)
   }
 

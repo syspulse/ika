@@ -57,6 +57,31 @@ class SolanaProcessorSpec extends AnyWordSpec with Matchers with ScalaFutures {
       httpCalls shouldBe 1
     }
 
+    "cache getBlock without commitment" in {
+      val cache = SolanaProcessor.expire(ttl = 30000L)
+      val req =
+        """{"jsonrpc":"2.0","method":"getBlock","params":[123456789,{"encoding":"jsonParsed","maxSupportedTransactionVersion":0,"transactionDetails":"full","rewards":true}],"id":123456789}"""
+      val rsp = loadTestFixture("RSP_getBlock.json")
+      var httpCalls = 0
+
+      val http = new HttpProcessor(compression = "") {
+        override def processRequest(session: Session): Future[Session] = {
+          httpCalls += 1
+          Future.successful(session.withResponse(ByteString(rsp), ResponseSource.REMOTE))
+        }
+      }
+
+      val pipeline = ProcessorPipeline.fromSeq(Seq(cache, http), "TestPipeline")
+
+      val r1 = pipeline.process(Session(requestBody = ByteString(req))).futureValue
+      r1.responseSource shouldBe ResponseSource.REMOTE
+      httpCalls shouldBe 1
+
+      val r2 = pipeline.process(Session(requestBody = ByteString(req))).futureValue
+      r2.responseSource shouldBe ResponseSource.CACHE
+      httpCalls shouldBe 1
+    }
+
     "cache getBlock with commitment level" in {
       val cache = SolanaProcessor.expire(ttl = 30000L)
       val req = loadTestFixture("REQ_getBlock_finalized.json")

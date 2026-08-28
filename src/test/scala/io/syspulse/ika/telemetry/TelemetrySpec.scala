@@ -6,6 +6,44 @@ import org.scalatest.wordspec.AnyWordSpec
 import io.syspulse.ika.processor.ai.TelemetryDataAiTokens
 
 class TelemetrySpec extends AnyWordSpec with Matchers {
+  "Telemetry.toScalarFlatKV" should {
+    "omit uptime and histogram count/sum" in {
+      val t = new Telemetry()
+      t.recordRequestTime(100)
+      t.recordRequestTime(200)
+      val kv = t.toScalarFlatKV
+      kv.keys should contain("request.duration.avg_ms")
+      kv.keys should not contain "uptime.ms"
+      kv.keys should not contain "request.duration.count"
+      kv.keys should not contain "request.duration.sum_ms"
+    }
+
+    "format doubles with dot decimal separator" in {
+      val t = new Telemetry()
+      t.recordRequestTime(100)
+      t.recordRequestTime(101)
+      val avg = t.toScalarFlatKV.get("request.duration.avg_ms")
+      avg shouldBe defined
+      avg.get should include(".")
+      avg.get should not include ","
+      avg.get shouldBe "100.50"
+    }
+
+    "expose cache hit ratio as percentage with two decimals" in {
+      val t = new Telemetry()
+      t.incCacheHits()
+      t.incCacheHits()
+      t.incCacheHits()
+      t.incCacheMisses()
+      t.toScalarFlatKV.get("cache.hit_ratio_pct") shouldBe Some("75.00")
+    }
+
+    "report zero cache hit ratio when no cache lookups" in {
+      val t = new Telemetry()
+      t.toScalarFlatKV.get("cache.hit_ratio_pct") shouldBe Some("0.00")
+    }
+  }
+
   "Telemetry.toFlatKV" should {
     "not repeat provider name in ai.tokens keys when model is provider/model" in {
       val t        = new Telemetry()

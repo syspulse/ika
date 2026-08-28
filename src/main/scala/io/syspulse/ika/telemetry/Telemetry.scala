@@ -1,5 +1,6 @@
 package io.syspulse.ika.telemetry
 
+import java.util.Locale
 import java.util.concurrent.atomic.{AtomicLong, AtomicReference}
 import java.util.concurrent.ConcurrentHashMap
 import scala.jdk.CollectionConverters._
@@ -22,6 +23,24 @@ class Telemetry {
 
   private val startTime = System.currentTimeMillis()
 
+  private def formatDecimal(value: Double, decimals: Int): String =
+    String.format(Locale.US, s"%.${decimals}f", value: java.lang.Double)
+
+  private def cacheHitRatioPct: Double = {
+    val hits   = getCounter("cache.hits")
+    val misses = getCounter("cache.misses")
+    val total  = hits + misses
+    if (total == 0) 0.0 else hits.toDouble * 100.0 / total.toDouble
+  }
+
+  private def histogramFlatKV: Map[String, String] =
+    getAllHistograms.flatMap { case (name, (_, _, avg)) =>
+      Map(s"${name}.avg_ms" -> formatDecimal(avg, 2))
+    }
+
+  private def derivedFlatKV: Map[String, String] =
+    Map("cache.hit_ratio_pct" -> formatDecimal(cacheHitRatioPct, 2))
+
   // ===== TelemetryData registry =====
 
   def registerData(name: String, data: TelemetryData): Unit =
@@ -43,20 +62,12 @@ class Telemetry {
    * Includes histograms, uptime, attributes, and scalar counters/gauges.
    */
   def toScalarFlatKV: Map[String, String] = {
-    val histKV: Map[String, String] =
-      getAllHistograms.flatMap { case (name, (sum, count, avg)) =>
-        Map(
-          s"${name}.sum_ms" -> sum.toString,
-          s"${name}.count"  -> count.toString,
-          s"${name}.avg_ms" -> f"$avg%.6f"
-        )
-      }
     val registeredKV: Map[String, String] =
       dataRegistry.asScala.values
         .filterNot(_.columnar)
         .foldLeft(Map.empty[String, String])(_ ++ _.toFlatKV)
-    histKV ++
-      Map("uptime.ms" -> getUptimeMs.toString) ++
+    histogramFlatKV ++
+      derivedFlatKV ++
       getAllAttributes.map { case (k, v) => s"attr.$k" -> v.compactPrint } ++
       registeredKV
   }
@@ -217,20 +228,11 @@ class Telemetry {
   // ===== Flat KV (for logging / toString only) =====
 
   def toFlatKV: Map[String, String] = {
-    val histKV: Map[String, String] =
-      getAllHistograms.flatMap { case (name, (sum, count, avg)) =>
-        Map(
-          s"${name}.sum_ms" -> sum.toString,
-          s"${name}.count"  -> count.toString,
-          s"${name}.avg_ms" -> f"$avg%.6f"
-        )
-      }
-
     val registeredKV: Map[String, String] =
       dataRegistry.asScala.values.foldLeft(Map.empty[String, String])(_ ++ _.toFlatKV)
 
-    histKV ++
-      Map("uptime.ms" -> getUptimeMs.toString) ++
+    histogramFlatKV ++
+      derivedFlatKV ++
       getAllAttributes.map { case (k, v) => s"attr.$k" -> v.compactPrint } ++
       registeredKV
   }

@@ -9,9 +9,8 @@ import scala.jdk.CollectionConverters._
 import io.syspulse.ika.processor.core._
 import io.syspulse.ika.processor.Processor
 import io.syspulse.ika.processor.uri.{CacheURI, PoolURI, Rpc3URI}
-import io.syspulse.ika.processor.rpc3.Rpc3Processor
 import io.syspulse.ika.processor.{ProcessorPipeline}
-import io.syspulse.ika.processor.rpc3.Rpc3Processor
+import io.syspulse.ika.processor.rpc3.{Rpc3Processor, SolanaProcessor, EvmProcessor}
 import io.syspulse.ika.processor.ai.{AIRouterProcessor, AITokensProcessorConfig}
 import io.syspulse.ika.processor.ai.AIRouterProcessor
 import io.syspulse.ika.processor.ai.AITokensProcessor
@@ -112,7 +111,11 @@ object ProcessorPipelineBuilder {
       PoolProcessor,
       ProxyProcessor,
       HttpProcessor,
+      
       Rpc3Processor,
+      //SolanaProcessor,
+      //EvmProcessor,
+
       AIRouterProcessor,
       AITokensProcessorConfig
     ).map(b => b.tpe -> b).toMap

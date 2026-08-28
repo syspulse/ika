@@ -14,9 +14,8 @@ import akka.util.ByteString
  *
  * Caching strategy:
  * - eth_blockNumber responses: cached with short TTL (hot cache)
- * - eth_getBlockByNumber with "latest": cached twice:
- *   1. With "latest" parameter (short TTL) - hot cache
- *   2. With actual block number (normal TTL) - cold cache
+ * - eth_getBlockByNumber: cached by method + params; "latest" requests also
+ *   get a second entry keyed by the resolved block number from the response
  *
  * This allows efficient caching while ensuring latest data freshness.
  */
@@ -41,11 +40,8 @@ class EvmProcessor(
     method == "eth_blockNumber"
   }
 
-  /**
-   * Check if this is eth_getBlockByNumber with "latest" parameter
-   */
-  override protected def isLatestBlockRequest(method: String, params: List[Any]): Boolean = {
-    method == "eth_getBlockByNumber" && params.headOption.contains("latest")
+  override protected def isBlockRequest(method: String): Boolean = {
+    method == "eth_getBlockByNumber"
   }
 
   /**
@@ -68,17 +64,12 @@ class EvmProcessor(
     }
   }
 
-  /**
-   * Replace "latest" with actual block number in cache key
-   */
-  override protected def replaceLatestInKey(cacheKey: String, blockIdentifier: String): String = {
+  override protected def replaceBlockInKey(cacheKey: String, blockIdentifier: String): String = {
     cacheKey.replaceAll("latest", blockIdentifier)
   }
 
   override protected def getTTL(cacheKey: String): Long = {
-    // Simple heuristic: if key contains "latest", use short TTL
-    // This works for both EVM ("latest") and Solana (commitment levels)
-    if (cacheKey.contains("latest")) {
+    if (cacheKey.startsWith("eth_blockNumber")) {
       ttlLatest
     } else {
       ttl

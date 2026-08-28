@@ -51,6 +51,10 @@ abstract class Rpc3Processor(
 
   override val name: String = "Rpc3"
 
+  private val Rpc3MethodKey = "rpc3.method"
+  private val Rpc3ParamsKey = "rpc3.params"
+  private val Rpc3CacheKeyKey = "rpc3.cacheKey"
+
   /**
    * Blockchain-specific: Check if this is a request for the current block/slot number.
    * Examples:
@@ -60,12 +64,12 @@ abstract class Rpc3Processor(
   protected def isBlockNumberRequest(method: String, params: List[Any]): Boolean
 
   /**
-   * Blockchain-specific: Check if this is a request for a block by identifier with "latest" parameter.
+   * Blockchain-specific: Check if this is a block data request (by method name only).
    * Examples:
-   * - EVM: eth_getBlockByNumber with params containing "latest"
-   * - Solana: getBlock with params containing commitment level indicating latest
+   * - EVM: eth_getBlockByNumber
+   * - Solana: getBlock
    */
-  protected def isLatestBlockRequest(method: String, params: List[Any]): Boolean
+  protected def isBlockRequest(method: String): Boolean
 
   /**
    * Blockchain-specific: Extract the block/slot identifier from a response.
@@ -78,12 +82,12 @@ abstract class Rpc3Processor(
   protected def extractBlockIdentifier(response: ByteString): Option[String]
 
   /**
-   * Blockchain-specific: Replace "latest" placeholder in cache key with actual block identifier.
+   * Blockchain-specific: Normalize cache key with actual block identifier from response.
    * Examples:
    * - EVM: Replace "latest" with actual block number like "0x123abc"
    * - Solana: Replace commitment level with actual slot number
    */
-  protected def replaceLatestInKey(cacheKey: String, blockIdentifier: String): String
+  protected def replaceBlockInKey(cacheKey: String, blockIdentifier: String): String
 
   /**
    * Parse single JSON-RPC request
@@ -93,7 +97,8 @@ abstract class Rpc3Processor(
       Some(req.parseJson.convertTo[ProxyRpcReq])
     } catch {
       case e: Exception =>
-        log.debug(s"Failed to parse RPC request: ${e.getMessage}: '${req}'")
+        val preview = req.take(200).replaceAll("\\s+", " ")
+        log.warn(s"Cache: SKIP: failed to parse RPC request: ${e.getMessage}: '$preview'")
         None
     }
   }
@@ -138,15 +143,31 @@ abstract class Rpc3Processor(
   /**
    * Get cache key for a single RPC request
    */
-  def getKey(req: ProxyRpcReq): String = {
-    getRpc3CacheKey(req.method, req.params)
+  def getKey(req: ProxyRpcReq): String = cacheKeyFor(req)
+
+  /** Stable JSON for cache keys (avoids Map/HashMap field-order drift in params.toString). */
+  private def paramValueToJson(value: Any): JsValue = value match {
+    case n: Int             => JsNumber(n)
+    case n: Long            => JsNumber(n)
+    case n: BigInt          => JsNumber(n)
+    case n: Double          => JsNumber(n)
+    case n: BigDecimal      => JsNumber(n)
+    case n: java.math.BigDecimal => JsNumber(n)
+    case s: String          => JsString(s)
+    case true               => JsTrue
+    case false              => JsFalse
+    case m: Map[_, _] @unchecked =>
+      JsObject(
+        m.asInstanceOf[Map[String, Any]].toSeq.sortBy(_._1).map { case (k, v) => k -> paramValueToJson(v) }: _*
+      )
+    case seq: Seq[_]        => JsArray(seq.map(paramValueToJson).toVector)
+    case arr: Array[_]      => JsArray(arr.map(paramValueToJson).toVector)
+    case other              => JsString(other.toString)
   }
 
-  /**
-   * Generate RPC3-specific cache key from method and params
-   */
-  private def getRpc3CacheKey(method: String, params: List[Any]): String = {
-    s"$method-${params.toString}"
+  private def cacheKeyFor(req: ProxyRpcReq): String = {
+    val paramsJson = JsArray(req.params.map(paramValueToJson)).compactPrint
+    s"${req.method}-$paramsJson"
   }
 
   import io.syspulse.ika.processor.core.HeaderProcessor
@@ -168,7 +189,7 @@ abstract class Rpc3Processor(
    * Override: Process with cache strategy - handle batch vs single requests
    */
   override protected def processCacheStrategy(session: Session): Future[Session] = {
-    val s0 = session
+    val s0 = enrichSessionWithRpc3Data(session)
     if (isBatchRequest(s0.requestBody)) {
         // Batch request - check cache, call downstream for uncached, then assemble + cache
         handleBatchRequestPhase(s0).flatMap { s =>
@@ -189,7 +210,7 @@ abstract class Rpc3Processor(
   }
 
   override protected def processCacheAsyncStrategy(session: Session): Future[Session] = {
-    val s0 = session
+    val s0 = enrichSessionWithRpc3Data(session)
     if (isBatchRequest(s0.requestBody)) {
       handleBatchRequestPhase(s0).flatMap { s =>
         if (s.responseBody.isDefined || s.shouldReturn || s.isRejected) Future.successful(s)
@@ -200,8 +221,8 @@ abstract class Rpc3Processor(
                 // Partial batch cache hits require assembly before returning.
                 handleBatchResponsePhase(down, resp)
               case Some(resp) =>
-                // All items were uncached: return the upstream batch immediately and cache in background.
-                runResponseCacheAsync(down, resp)
+                // All items uncached: return upstream immediately, cache batch items in background.
+                runBatchResponseCacheAsync(down, resp)
                 Future.successful(down)
               case None =>
                 Future.successful(down)
@@ -215,24 +236,45 @@ abstract class Rpc3Processor(
   }
 
   /**
-   * Override: Generate cache key from RPC3 request (single requests only)
+   * Parse RPC3 request metadata into session before cache lookup/store.
+   */
+  override protected def handleRequestPhase(session: Session): Future[Session] = {
+    super.handleRequestPhase(enrichSessionWithRpc3Data(session))
+  }
+
+  private def enrichSessionWithRpc3Data(session: Session): Session = {
+    if (session.getData[String](Rpc3CacheKeyKey).isDefined) return session
+
+    val reqString = session.requestBody.utf8String.trim
+    if (!reqString.startsWith("{")) return session
+
+    parseSingleReq(reqString).fold(session) { req =>
+      val cacheKey = cacheKeyFor(req)      
+      session
+        .putData(Rpc3MethodKey, req.method)
+        .putData(Rpc3ParamsKey, req.params)
+        .putData(Rpc3CacheKeyKey, cacheKey)
+    }
+  }
+
+  /**
+   * Override: Return cache key parsed once in [[enrichSessionWithRpc3Data]] (single requests only)
    */
   override protected def getCacheKey(session: Session): Option[String] = {
-    val reqString = session.requestBody.utf8String
-    // Only cache single JSON-RPC requests (not batch)
-    if (!reqString.trim.startsWith("{")) {
-      log.warn("Cache: SKIP: non-single request (batch or invalid)")
-      return None
-    }
-
-    parseSingleReq(reqString).map { req =>
-      val key = getRpc3CacheKey(req.method, req.params)
-
-      // Store method and params in session for response phase
-      session.putData("rpc3.method", req.method)
-      session.putData("rpc3.params", req.params)
-
-      key
+    session.getData[String](Rpc3CacheKeyKey) match {
+      case some @ Some(_) => some
+      case None =>
+        val reqString = session.requestBody.utf8String.trim
+        if (reqString.startsWith("[")) {
+          // Batch requests use [[handleBatchRequestPhase]] instead of this path.
+          None
+        } else if (!reqString.startsWith("{")) {
+          log.warn(s"Cache: SKIP: request is not JSON-RPC object or batch: '${reqString.take(120)}'")
+          None
+        } else {
+          log.warn(s"Cache: SKIP: could not build cache key for single request: '${reqString.take(120)}'")
+          None
+        }
     }
   }
 
@@ -268,43 +310,35 @@ abstract class Rpc3Processor(
   }
 
   /**
-   * Override: Store response with RPC3-specific logic (block number caching)
+   * Override: Store response with RPC3-specific logic (block caching)
    */
   override protected def storeInCache(session: Session, cacheKey: String, response: ByteString): Future[Session] = {
     val now = System.currentTimeMillis()
-
-    // Extract method and params from session
-    val method = session.getData[String]("rpc3.method").getOrElse("")
-    val params = session.getData[List[Any]]("rpc3.params").getOrElse(List.empty)
-
-    // Check if this is a "latest" block request
-    val isCurrentBlockNumber = isBlockNumberRequest(method, params)
-    val isLatest = isLatestBlockRequest(method, params)
-
-    // Store in cache with appropriate TTL
-    if (isCurrentBlockNumber || isLatest) {
-      // Hot cache - shorter TTL for "latest" blocks
-      cache.put(cacheKey, CacheEntry(now, response))
-      log.debug(s"Cache: STORE: 'latest': $cacheKey")
-
-      // For latest block requests, also cache with actual block identifier
-      if (isLatest) {
-        extractBlockIdentifier(response) match {
-          case Some(blockId) if blockId.nonEmpty =>
-            val keyBlock = replaceLatestInKey(cacheKey, blockId)
-            cache.put(keyBlock, CacheEntry(now, response))
-            log.debug(s"Cache: STORE: block: $keyBlock")
-          case _ =>
-            log.debug(s"Could not extract block identifier from latest block response")
-        }
-      }
-    } else {
-      // Regular cache - normal TTL
-      cache.put(cacheKey, CacheEntry(now, response))
-      log.debug(s"Cache: STORE: $cacheKey")
-    }
-
+    val method = session.getData[String](Rpc3MethodKey).getOrElse("")
+    storeResponseInCache(method, cacheKey, response, now)
     Future.successful(session)
+  }
+
+  private def storeResponseInCache(method: String, cacheKey: String, response: ByteString, now: Long): Unit = {
+    
+    log.info(s"Cache(${cache.size}): STORE: $cacheKey")
+    
+    cache.put(cacheKey, CacheEntry(now, response))    
+
+    if (isBlockRequest(method)) {
+      extractBlockIdentifier(response) match {
+        case Some(blockId) if blockId.nonEmpty =>
+          val keyBlock = replaceBlockInKey(cacheKey, blockId)
+          if (keyBlock != cacheKey) {
+            cache.put(keyBlock, CacheEntry(now, response))
+            log.info(s"Cache: STORE: $cacheKey: block=$keyBlock")
+          } else {
+            
+          }
+        case _ =>
+          log.warn(s"Could not extract block")
+      }
+    }
   }
 
   /**
@@ -332,19 +366,26 @@ abstract class Rpc3Processor(
       )
     }
 
-    val keys = requestPairs.map { case (req, _) => getKey(req) }
+    val keys = requestPairs.map { case (req, _) =>
+      val key = getKey(req)
+      log.debug(s"Cache: LOOKUP: $key")
+      key
+    }
     val now = System.currentTimeMillis()
 
     // Check cache for all items
     val cachedResponses: Seq[Option[ByteString]] = keys.map { key =>
-      cache.get(key).flatMap { entry =>
-        val entryTTL = getTTL(key)
-        if (now - entry.ts < entryTTL) {
+      cache.get(key) match {
+        case Some(entry) if now - entry.ts < getTTL(key) =>
+          log.debug(s"Cache: HIT: $key")
           Some(entry.response)
-        } else {
+        case Some(_) =>
           cache.remove(key)
+          log.debug(s"Cache: MISS (expired): $key")
           None
-        }
+        case None =>
+          log.debug(s"Cache: MISS: $key")
+          None
       }
     }
 
@@ -355,7 +396,10 @@ abstract class Rpc3Processor(
     if (uncachedPairs.isEmpty) {
       // All cached - return early
       val response = ByteString(s"[${allPairs.map(_._2.get.utf8String).mkString(",")}]")
+      
       log.debug(s"Cache: HIT: batch=${requestPairs.size}")
+      log.info(s"Req([${session.requestBody.size}]) <-- Cache([${response.size}],${keys.mkString(",")})")
+      
       recordCacheHit(session)
 
       Future.successful(session
@@ -368,9 +412,14 @@ abstract class Rpc3Processor(
       // Some uncached - modify request to only include uncached items using original JSON strings
       val uncachedJsonStrings = uncachedPairs.map(_._1._2) // Get the original JSON string
 
-      val modifiedBatchRequest = ByteString(s"[${uncachedJsonStrings.mkString(",")}]")
+      log.debug(s"BATCH(hot=${cachedResponses.flatten.size},cold=${uncachedPairs.size}): request='${session.requestBody.utf8String}'")
 
-      log.debug(s"Cache: STORE: (${cachedResponses.flatten.size} cached, ${uncachedPairs.size} uncached)")
+      // optimization to avoid modifying when none are uncached
+      val modifiedBatchRequest = if(uncachedJsonStrings.size == 0)
+        session.requestBody
+      else
+        ByteString(s"[${uncachedJsonStrings.mkString(",")}]")
+      
       recordCacheMiss(session)
 
       Future.successful(session
@@ -434,7 +483,7 @@ abstract class Rpc3Processor(
         freshResponses.zip(uncachedPairs).foreach { case (freshResp, ((req, _), _)) =>
           if (!isError(ByteString(freshResp))) {
             val key = getKey(req)
-            storeSingleInCache(key, ByteString(freshResp), now)
+            storeResponseInCache(req.method, key, ByteString(freshResp), now)
           } else {
             log.debug(s"Cache: SKIP: error response: ${req.method}")
           }
@@ -473,42 +522,18 @@ abstract class Rpc3Processor(
     }
   }
 
-  /**
-   * Store a single response in cache (used by batch caching)
-   *
-   * Note: For batch requests, we don't have session context with method/params,
-   * so we use heuristic checks on the cache key to determine if it's a latest block request.
-   */
-  private def storeSingleInCache(cacheKey: String, response: ByteString, now: Long): Unit = {
-    // Heuristic: check if key contains "latest" or similar indicators
-    val isLatestLike = cacheKey.contains("latest") ||
-                       cacheKey.contains("finalized") ||
-                       cacheKey.contains("confirmed")
-
-    if (isLatestLike) {
-      // Hot cache - shorter TTL for "latest" blocks
-      cache.put(cacheKey, CacheEntry(now, response))
-      log.debug(s"Cache: 'latest': $cacheKey")
-
-      // Try to extract block identifier and create a cold cache entry
-      extractBlockIdentifier(response) match {
-        case Some(blockId) if blockId.nonEmpty =>
-          val keyBlock = replaceLatestInKey(cacheKey, blockId)
-          cache.put(keyBlock, CacheEntry(now, response))
-          log.debug(s"Cache: block: $keyBlock")
-        case _ =>
-          log.debug(s"Could not extract block identifier from response")
-      }
-    } else {
-      // Regular cache - normal TTL
-      cache.put(cacheKey, CacheEntry(now, response))
-      log.debug(s"Cache: STORE: $cacheKey")
-    }
-  }
-
   private def hasCachedBatchItems(session: Session): Boolean =
     session.getData[Seq[((ProxyRpcReq, String), Option[ByteString])]]("batchAllPairs")
       .exists(_.exists(_._2.isDefined))
+
+  private def runBatchResponseCacheAsync(session: Session, response: ByteString): Unit = {
+    val _ = Future(handleBatchResponsePhase(session, response))
+      .flatMap(identity)
+      .recover { case e =>
+        log.warn(s"Cache: async batch write failed: ${e.getMessage}")
+        session
+      }
+  }
 
   override def toString: String = s"${name}($strategy,${ttl},${ttlLatest},${gcFreq})"
 }

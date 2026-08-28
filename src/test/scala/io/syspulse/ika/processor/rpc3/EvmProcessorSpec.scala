@@ -57,6 +57,30 @@ class EvmProcessorSpec extends AnyWordSpec with Matchers with ScalaFutures {
       httpCalls shouldBe 1
     }
 
+    "cache eth_getBlockByNumber with explicit block number" in {
+      val cache = EvmProcessor.expire(ttl = 30000L)
+      val req = """{"jsonrpc":"2.0","method":"eth_getBlockByNumber","params":["0x123abc", false],"id":1}"""
+      val rsp = loadTestFixture("RSP_latest.json")
+      var httpCalls = 0
+
+      val http = new HttpProcessor(compression = "") {
+        override def processRequest(session: Session): Future[Session] = {
+          httpCalls += 1
+          Future.successful(session.withResponse(ByteString(rsp), ResponseSource.REMOTE))
+        }
+      }
+
+      val pipeline = ProcessorPipeline.fromSeq(Seq(cache, http), "TestPipeline")
+
+      val r1 = pipeline.process(Session(requestBody = ByteString(req))).futureValue
+      r1.responseSource shouldBe ResponseSource.REMOTE
+      httpCalls shouldBe 1
+
+      val r2 = pipeline.process(Session(requestBody = ByteString(req))).futureValue
+      r2.responseSource shouldBe ResponseSource.CACHE
+      httpCalls shouldBe 1
+    }
+
     "cache eth_getBlockByNumber with 'latest'" in {
       val cache = EvmProcessor.expire(ttl = 30000L)
       val req = loadTestFixture("REQ_latest.json")
