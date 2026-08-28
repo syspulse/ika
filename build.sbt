@@ -23,8 +23,11 @@ test / fork := true
 run / fork := true
 run / connectInput := true
 
-// inject envs into tests
-Test / envVars := sys.env.toMap
+// inject envs into tests (defaults for application.conf substitutions)
+Test / envVars := sys.env.toMap ++ Map(
+  "SOL_RPC_URL" -> sys.env.getOrElse("SOL_RPC_URL", "http://127.0.0.1:9/"),
+  "ETH_RPC_URL" -> sys.env.getOrElse("ETH_RPC_URL", "http://127.0.0.1:9/")
+)
 
 enablePlugins(JavaAppPackaging)
 enablePlugins(DockerPlugin)
