@@ -33,14 +33,17 @@ class ProcessorPipeline(
    * Records metrics to telemetry.
    */
   def process(session: Session): Future[Session] = {
-    log.debug(s"Starting pipeline with ${processors.size} processors")
+    log.trace(s"Start: ${processors}")
 
     val sessionWithTelemetry = telemetry match {
       case Some(t) => session.putData("telemetry", t)
       case None    => session
     }
 
-    telemetry.foreach(_.incRequests())
+    telemetry.foreach { t =>
+      t.incRequests()
+      t.addRequestBytes(sessionWithTelemetry.requestBody.length.toLong)
+    }
 
     val initialized = sessionWithTelemetry.withPipeline(processors)
 
@@ -60,9 +63,10 @@ class ProcessorPipeline(
       }
 
     start.map { finalSession =>
-      log.debug(s"Pipeline completed. Rejected: ${finalSession.isRejected}, Duration: ${finalSession.durationMs}ms")
+      log.trace(s"Completed: ${finalSession}: ${finalSession.durationMs}ms")
       telemetry.foreach { t =>
         if (finalSession.isRejected) t.incRejections() else t.incResponses()
+        t.addResponseBytes(finalSession.responseBody.map(_.length.toLong).getOrElse(0L))
         t.recordRequestTime(finalSession.durationMs)
       }
       finalSession.complete()
@@ -92,8 +96,8 @@ object ProcessorPipeline {
   /**
    * Create a pipeline from a sequence
    */
-  def fromSeq(processors: Seq[Processor], name: String = "Pipeline")(implicit ec: ExecutionContext): ProcessorPipeline = {
-    new ProcessorPipeline(processors, name, None)
+  def fromSeq(processors: Seq[Processor], name: String = "Pipeline", telemetry: Option[Telemetry] = None)(implicit ec: ExecutionContext): ProcessorPipeline = {
+    new ProcessorPipeline(processors, name, telemetry)
   }
 
   /**

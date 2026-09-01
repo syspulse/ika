@@ -42,7 +42,7 @@ class ProcessorPipelineBuilderFromFileSpec extends AnyWordSpec with Matchers {
       val cfg = parseConfFileIgnoringIncludes("conf/application-ika.conf")
       cfg.hasPath("profiles.rpc3.processors") shouldBe true
 
-      val pipeline = ProcessorPipelineBuilder.fromConfig(cfg, "rpc3")
+      val pipeline = ProcessorPipelineBuilder.fromConfig(cfg, "rpc3", None)
       val s = pipeline.toString
 
       s should include("Pool")
@@ -54,7 +54,7 @@ class ProcessorPipelineBuilderFromFileSpec extends AnyWordSpec with Matchers {
       val cfg = parseConfFileIgnoringIncludes("conf/application-ika.conf")
       cfg.hasPath("profiles.proxy.processors") shouldBe true
 
-      val pipeline = ProcessorPipelineBuilder.fromConfig(cfg, "proxy")
+      val pipeline = ProcessorPipelineBuilder.fromConfig(cfg, "proxy", None)
       val s = pipeline.toString
 
       s should include("Http")
@@ -62,7 +62,7 @@ class ProcessorPipelineBuilderFromFileSpec extends AnyWordSpec with Matchers {
 
     "build pipeline generically via fromProfile(appCfg, name, ...) for custom profiles" in {
       val cfg = parseConfFileIgnoringIncludes("conf/application-ika.conf")
-      val pipeline = ProcessorPipelineBuilder.fromProfile(cfg, "http-pool")
+      val pipeline = ProcessorPipelineBuilder.fromProfile(cfg, "http-pool", None)
       val s = pipeline.toString
 
       // profile.http-pool = "pool_1, http_1"

@@ -12,11 +12,11 @@ import spray.json._
 
 import akka.actor.ActorSystem
 import io.syspulse.ika.processor.{Session, ProcessorPipeline}
-import io.syspulse.ika.processor.impl.HttpProcessor
+import io.syspulse.ika.processor.core.HttpProcessor
 import io.syspulse.ika.processor.ResponseSource
 import akka.util.ByteString
 
-class CacheRpc3BatchSpec extends AnyWordSpec with Matchers with ScalaFutures {
+class Rpc3BatchSpec extends AnyWordSpec with Matchers with ScalaFutures {
 
   implicit val ec: ExecutionContext = ExecutionContext.global
   implicit val actorSystem: ActorSystem = ActorSystem("test")
@@ -26,7 +26,7 @@ class CacheRpc3BatchSpec extends AnyWordSpec with Matchers with ScalaFutures {
     PatienceConfig(timeout = 3.seconds, interval = 25.millis)
 
   /** Project `test/` directory (see `build.sbt` / `-Duser.dir` for runs). */
-  private val testDir = Paths.get(System.getProperty("user.dir"), "test", "rpc3")
+  private val testDir = Paths.get(System.getProperty("user.dir"), "test", "rpc3", "evm")
 
   private def loadTestFixture(name: String): String =
     Source.fromFile(testDir.resolve(name).toFile, "UTF-8").mkString.trim
@@ -301,7 +301,7 @@ class CacheRpc3BatchSpec extends AnyWordSpec with Matchers with ScalaFutures {
         val decoded = cache.decodeBatch(req).toVector
 
         // Seed cache for selected ids
-        decoded.foreach { r =>
+        decoded.foreach { case (r, jsonStr) =>
           val idNum = anyIdToInt(r.id)
           if (cachedIds.contains(idNum)) {
             val key = cache.getKey(r)

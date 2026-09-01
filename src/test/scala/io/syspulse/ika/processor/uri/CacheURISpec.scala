@@ -19,32 +19,39 @@ class CacheURISpec extends AnyWordSpec with Matchers {
       c.gcFreq shouldBe DefGc
     }
 
-    "parse expire:// with defaults" in {
-      val c = CacheURI("expire://")
-      c.kind shouldBe "expire"
+    "parse cache:// with defaults" in {
+      val c = CacheURI("cache://")
+      c.kind shouldBe "cache"
       c.ttl shouldBe DefTtl
       c.ttlLatest shouldBe DefTtlLatest
       c.gcFreq shouldBe DefGc
     }
 
-    "parse expire:// with ttl only" in {
-      val c = CacheURI("expire://45000")
-      c.kind shouldBe "expire"
+    "parse cache:// with ttl only" in {
+      val c = CacheURI("cache://45000")
+      c.kind shouldBe "cache"
       c.ttl shouldBe 45000L
       c.ttlLatest shouldBe DefTtlLatest
       c.gcFreq shouldBe DefGc
     }
 
-    "parse expire:// with ttl and gcFreq" in {
-      val c = CacheURI("expire://45000,5000")
-      c.kind shouldBe "expire"
+    "parse cache:// with ttl and gcFreq" in {
+      val c = CacheURI("cache://45000,5000")
+      c.kind shouldBe "cache"
       c.ttl shouldBe 45000L
       c.ttlLatest shouldBe DefTtlLatest
       c.gcFreq shouldBe 5000L
     }
 
     "trim spaces around comma-separated params" in {
-      val c = CacheURI("expire://45000 , 5000 ")
+      val c = CacheURI("cache://45000 , 5000 ")
+      c.ttl shouldBe 45000L
+      c.gcFreq shouldBe 5000L
+    }
+
+    "parse cache_async:// with ttl and gcFreq" in {
+      val c = CacheURI("cache_async://45000,5000")
+      c.kind shouldBe "cache_async"
       c.ttl shouldBe 45000L
       c.gcFreq shouldBe 5000L
     }
@@ -87,27 +94,34 @@ class CacheURISpec extends AnyWordSpec with Matchers {
       c.ttl shouldBe 5000L
     }
 
-    "default to expire when there is no :// separator" in {
+    "default to cache when there is no :// separator" in {
       val c = CacheURI("not-a-uri")
-      c.kind shouldBe "expire"
+      c.kind shouldBe "cache"
       c.ttl shouldBe DefTtl
       c.gcFreq shouldBe DefGc
     }
 
-    "default to expire for unknown scheme" in {
+    "default to cache for unknown scheme" in {
       val c = CacheURI("unknown://stuff")
-      c.kind shouldBe "expire"
+      c.kind shouldBe "cache"
       c.ttl shouldBe DefTtl
       c.gcFreq shouldBe DefGc
     }
 
-    "parse expire:// with query params (?&)" in {
-      val c = CacheURI("expire://?ttl=45000&gc=5000")
-      c.kind shouldBe "expire"
+    "parse cache:// with query params (?&)" in {
+      val c = CacheURI("cache://?ttl=45000&gc=5000")
+      c.kind shouldBe "cache"
       c.ttl shouldBe 45000L
       c.gcFreq shouldBe 5000L
       c.ops("ttl") shouldBe "45000"
       c.ops("gc") shouldBe "5000"
+    }
+
+    "parse expire:// as cache alias" in {
+      val c = CacheURI("expire://?ttl=45000&gc=5000")
+      c.kind shouldBe "cache"
+      c.ttl shouldBe 45000L
+      c.gcFreq shouldBe 5000L
     }
 
     "parse rpc3:// with query params (?&)" in {

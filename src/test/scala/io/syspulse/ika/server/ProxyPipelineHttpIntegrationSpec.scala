@@ -19,13 +19,7 @@ import akka.stream.Materializer
 import io.syspulse.ika.processor.{ProcessorPipeline}
 import io.syspulse.ika.processor.util.ProcessorPipelineBuilder
 import io.syspulse.ika.processor.util.PipelineProfile
-import io.syspulse.ika.processor.impl.{
-  HttpProcessor,
-  PoolProcessor,
-  RejectionProcessor,
-  RetryProcessor,
-  TimeoutProcessor
-}
+import io.syspulse.ika.processor.core.{HttpProcessor, PoolProcessor, RejectionProcessor, RetryProcessor, TimeoutProcessor}
 import io.syspulse.ika.processor.rpc3.Rpc3Processor
 import io.syspulse.ika.store.{ProxyStore, ProxyStorePipeline}
 import akka.util.ByteString
@@ -185,6 +179,26 @@ class ProxyPipelineHttpIntegrationSpec
     }
 
     "using no cache (none://)" should {
+      "proxy an empty backend response without pipeline error" in {
+        val backendRoute = post {
+          pathEndOrSingleSlash {
+            complete(HttpResponse(status = StatusCodes.OK, entity = HttpEntity.Empty))
+          }
+        }
+        val backendBinding = bind(backendRoute)
+        try {
+          val pipeline = ProcessorPipeline.fromSeq(
+            Seq(PoolProcessor.sticky(Seq(backendUrl(backendBinding))), new HttpProcessor()),
+            "EmptyResponse"
+          )
+          val store = new ProxyStorePipeline(pipeline, "empty-response")
+          val px = bind(proxyRoute(store))
+          try {
+            postJson(backendUrl(px), ethBlockReq) shouldBe ""
+          } finally px.unbind().futureValue
+        } finally backendBinding.unbind().futureValue
+      }
+
       "call the backend for every request" in {
         val hits = new AtomicInteger(0)
         val backendRoute = post {
@@ -283,11 +297,35 @@ class ProxyPipelineHttpIntegrationSpec
               entity = HttpEntity(ContentTypes.`application/json`, ethBlockReq)
             )
             val resp = Http().singleRequest(req).futureValue
-            resp.status shouldBe StatusCodes.OK
+            resp.status shouldBe StatusCodes.GatewayTimeout
             val body = Unmarshal(resp.entity).to[String].futureValue
-            body should include("error")
+            body should include("upstream_failed")
+            body should include("timeout")
           } finally px.unbind().futureValue
         } finally backendBinding.unbind().futureValue
+      }
+
+      "surface a bad gateway error when the backend connection fails" in {
+        val pipeline = ProcessorPipeline.fromSeq(
+          Seq(
+            PoolProcessor.sticky(Seq("http://127.0.0.1:1/")),
+            new HttpProcessor(connectTimeoutMs = Some(100L), responseTimeoutMs = Some(500L))
+          ),
+          "ConnectionFailure"
+        )
+        val store = new ProxyStorePipeline(pipeline, "connection-failure")
+        val px = bind(proxyRoute(store))
+        try {
+          val req = HttpRequest(
+            HttpMethods.POST,
+            Uri(backendUrl(px)),
+            entity = HttpEntity(ContentTypes.`application/json`, ethBlockReq)
+          )
+          val resp = Http().singleRequest(req).futureValue
+          resp.status shouldBe StatusCodes.BadGateway
+          val body = Unmarshal(resp.entity).to[String].futureValue
+          body should include("upstream_failed")
+        } finally px.unbind().futureValue
       }
     }
 

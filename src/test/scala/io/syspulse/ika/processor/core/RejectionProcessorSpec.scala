@@ -1,4 +1,4 @@
-package io.syspulse.ika.processor.impl
+package io.syspulse.ika.processor.core
 
 import org.scalatest.matchers.should.Matchers
 import org.scalatest.wordspec.AnyWordSpec
@@ -8,6 +8,7 @@ import scala.concurrent.duration._
 import io.syspulse.ika.processor.{Session, Rejection}
 import io.syspulse.ika.processor.ResponseSource
 import akka.util.ByteString
+import io.syspulse.ika.processor.core.RejectionProcessor
 
 class RejectionProcessorSpec extends AnyWordSpec with Matchers {
 

@@ -1,6 +1,7 @@
 package io.syspulse.ika.processor.ai
 
 import scala.concurrent.{Future, ExecutionContext}
+import scala.jdk.CollectionConverters._
 import com.typesafe.scalalogging.Logger
 import com.typesafe.config.{Config => TypesafeConfig}
 import akka.actor.ActorSystem
@@ -10,11 +11,9 @@ import spray.json._
 import io.syspulse.skel.util.Util
 
 import io.syspulse.ika.processor.{RequestProcessor, Session, Processor}
-import io.syspulse.ika.processor.impl.HeaderProcessor
+import io.syspulse.ika.processor.core.HeaderProcessor
 import io.syspulse.ika.processor.util.ProcessorConfigurable
 import io.syspulse.ika.processor.uri.AiURI
-
-
 /**
  * AIRouterProcessor extracts the model from AI API requests and routes to the appropriate pool.
  *
@@ -40,9 +39,12 @@ class AIRouterProcessor(
   providerUris: Map[String, String] = Map.empty,
   defaultProvider: String = "openai",
   modelProviderMapping: Map[String, String] = Map.empty,
+  // Custom prefix→provider entries; prepended before defaultModelPrefixMappings so they take priority.
+  modelPrefixMapping: Seq[(String, String)] = Seq.empty,
   providerApiHeaderName: Map[String, String] = Map.empty,
   // NOTE: values here are FINAL header values (already formatted with api_key if needed).
-  providerApiHeaderValue: Map[String, String] = Map.empty
+  providerApiHeaderValue: Map[String, String] = Map.empty,
+  providerHeaders: Map[String, Map[String, String]] = Map.empty
 )(implicit ec: ExecutionContext) extends RequestProcessor {
 
   override val name: String = "AIRouter"
@@ -59,9 +61,10 @@ class AIRouterProcessor(
 
   private val headerProcessors: Map[String, HeaderProcessor] = {
     val providers: Set[String] =
-      (providerUris.keySet ++ providerApiHeaderName.keySet ++ providerApiHeaderValue.keySet ++ Set(defaultProvider)).filter(_.trim.nonEmpty)
+      (providerUris.keySet ++ providerApiHeaderName.keySet ++ providerApiHeaderValue.keySet ++ providerHeaders.keySet ++ Set(defaultProvider)).filter(_.trim.nonEmpty)
 
     providers.map { p =>
+      val customAdds = providerHeaders.getOrElse(p, Map.empty)
       val authAdds: Map[String, String] = (for {
         hn <- providerApiHeaderName.get(p).orElse(providerApiHeaderName.get(defaultProvider))
         hv <- providerApiHeaderValue.get(p).orElse(providerApiHeaderValue.get(defaultProvider))
@@ -72,7 +75,7 @@ class AIRouterProcessor(
 
       p -> new HeaderProcessor(
         removeRequest = commonRemoveRequest,
-        addRequest = commonAddRequest ++ authAdds
+        addRequest = commonAddRequest ++ customAdds ++ authAdds
       )
     }.toMap
   }
@@ -88,7 +91,7 @@ class AIRouterProcessor(
       // Extract model field
       json.fields.get("model") match {
         case Some(JsString(model)) =>
-          val provider = extractProvider(model)
+          val (provider, providerModel) = extractProviderAndModel(model)
           val pool = provider
           val destination = resolveDestination(provider)
 
@@ -96,8 +99,14 @@ class AIRouterProcessor(
             case Some(uri) =>
               log.info(s"Routing AI request: model='$model', provider='$provider', pool='$pool' -> destination='$uri'")
 
+              // Rewrite request body for provider: strip optional "provider/" prefix from `model`
+              // so upstream receives only the model name (e.g. "openai/gpt-4o-mini" -> "gpt-4o-mini").
+              val rewritten = JsObject(json.fields.updated("model", JsString(providerModel))).compactPrint
+
               val s0 = session
+                .withRequestBody(akka.util.ByteString(rewritten))
                 .putData("model", model)
+                .putData("modelUpstream", providerModel)
                 .putData("provider", provider)
                 .putData("pool", pool)
                 // Only resolve base destination; HttpProcessor is responsible for appending uriSuffix.
@@ -157,24 +166,39 @@ class AIRouterProcessor(
   }
 
   /**
-   * Extract provider from model string.
+   * Extract provider and provider-facing model name from model string.
    *
-   * Format: "provider/model-name" → provider
-   * If no "/" found, use model mapping or default provider.
+   * Resolution priority (highest first):
+   * 1. "provider/model-name" slash-prefix  → (provider, model-name)
+   * 2. Exact match in modelProviderMapping  → (provider, model)
+   * 3. Prefix match: custom modelPrefixMapping, then AIRouterProcessor.defaultModelPrefixMappings
+   * 4. defaultProvider
    *
    * Examples:
-   * - "openai/gpt-4o-mini" → "openai"
-   * - "anthropic/claude-3-opus" → "anthropic"
-   * - "gpt-4" → "openai"  // default provider
+   * - "openai/gpt-4o-mini"           → ("openai",     "gpt-4o-mini")
+   * - "anthropic/claude-3-opus"      → ("anthropic",   "claude-3-opus")
+   * - "claude-haiku-4-5-20251001"    → ("claude",      "claude-haiku-4-5-20251001")
+   * - "gpt-4o-mini"                  → ("openai",      "gpt-4o-mini")
+   * - "gemini-pro"                   → ("gemini",      "gemini-pro")
+   * - "grok-2"                       → ("grok",        "grok-2")
    */
-  private def extractProvider(model: String): String = {
+  private def extractProviderAndModel(model: String): (String, String) = {
     val parts = model.split("/", 2)
 
     if (parts.length > 1) {
-      parts(0)
+      (parts(0), parts(1))
     } else {
-      // No provider specified, check mapping or use default
-      modelProviderMapping.getOrElse(model, defaultProvider)
+      // Exact match takes priority over prefix matching
+      modelProviderMapping.get(model) match {
+        case Some(provider) => (provider, model)
+        case None =>
+          // Custom prefixes override built-in ones
+          val allPrefixes = modelPrefixMapping ++ AIRouterProcessor.defaultModelPrefixMappings
+          val provider = allPrefixes
+            .collectFirst { case (prefix, p) if model.startsWith(prefix) => p }
+            .getOrElse(defaultProvider)
+          (provider, model)
+      }
     }
   }
 
@@ -184,6 +208,18 @@ class AIRouterProcessor(
 
 object AIRouterProcessor extends ProcessorConfigurable {
   override val tpe: String = "ai_router"
+
+  /**
+   * Built-in model-name-prefix → provider mappings checked when no "provider/" slash prefix
+   * is present and no exact modelProviderMapping entry matches.
+   * Order matters: first match wins.
+   */
+  val defaultModelPrefixMappings: Seq[(String, String)] = Seq(
+    "claude"  -> "claude",
+    "gpt-"    -> "openai",
+    "gemini"  -> "gemini",
+    "grok"    -> "grok",
+  )
 
   /**
    * Create AIRouterProcessor with default settings
@@ -246,6 +282,25 @@ object AIRouterProcessor extends ProcessorConfigurable {
         (Map.empty[String, String], Map.empty[String, String])
       }
 
+    val providerHeaders: Map[String, Map[String, String]] =
+      if (cfg.hasPath("providers")) {
+        val p = cfg.getConfig("providers")
+        val names = p.root().keySet().toArray(new Array[String](0)).toSeq
+        names.flatMap { n =>
+          val c = p.getConfig(n)
+          if (c.hasPath("headers")) {
+            val hs = c.getConfig("headers").entrySet().asScala.map { e =>
+              e.getKey -> c.getString(s"headers.${e.getKey}")
+            }.toMap
+            Some(n -> hs)
+          } else {
+            None
+          }
+        }.toMap
+      } else {
+        Map.empty[String, Map[String, String]]
+      }
+
     // Compute FINAL header values here: api_key_header_value.format(api_key)
     val providerHeaderValuesFormatted: Map[String, String] =
       providerHeaderValues.flatMap { case (provider, template) =>
@@ -254,11 +309,25 @@ object AIRouterProcessor extends ProcessorConfigurable {
         }
       }
 
+    // Optional custom prefix→provider overrides; prepended before built-in defaults.
+    // Config format:
+    //   model_prefix { "llama" = "meta", "mistral" = "mistral" }
+    val customPrefixMappings: Seq[(String, String)] =
+      if (cfg.hasPath("model_prefix")) {
+        val pm = cfg.getConfig("model_prefix")
+        pm.root().keySet().toArray(new Array[String](0)).toSeq
+          .map(k => k -> pm.getString(k))
+      } else {
+        Seq.empty
+      }
+
     Seq(new AIRouterProcessor(
       providerUris = providerUris,
       defaultProvider = defaultProvider,
+      modelPrefixMapping = customPrefixMappings,
       providerApiHeaderName = providerHeaderNames,
-      providerApiHeaderValue = providerHeaderValuesFormatted
+      providerApiHeaderValue = providerHeaderValuesFormatted,
+      providerHeaders = providerHeaders
     ))
   }
 }

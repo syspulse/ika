@@ -13,6 +13,7 @@ import io.syspulse.ika.store._
 import io.syspulse.ika.pool._
 import io.syspulse.ika.processor._
 import io.syspulse.ika.server.ProxyRoutes
+import io.syspulse.ika.telemetry.TelemetryStore
 import akka.actor.ActorSystem
 
 import io.jvm.uuid._
@@ -29,7 +30,7 @@ case class Config(
 
   // Core components (generic)
   datastore:String = "pipeline://",  // pipeline://, rpc://, simple://, none://
-  telemetry:String = "stdout://60",  // stdout://, prometheus://, log://
+  telemetry:String = "stdout://60000",  // stdout://, prometheus://, log://
   
   // Security
   apiKey:String = "",                // API key suffix to URL
@@ -51,15 +52,16 @@ object App extends skel.Server {
       new ConfigurationAkka,
       new ConfigurationProp,
       new ConfigurationEnv, 
-      new ConfigurationArgs(args,"squid3","",
+      new ConfigurationArgs(args,"ika","",
         ArgString('h', "http.host",s"listen host (def: ${d.host})"),
         ArgInt('p', "http.port",s"listern port (def: ${d.port})"),
         ArgString('u', "http.uri",s"api uri (def: ${d.uri})"),
 
-        ArgString('d', "datastore",s"Datastore [none://,rpc://,pipeline://,pipeline://web3,pipeline://simple] (def: ${d.datastore})"),        
+        ArgString('d', "datastore",s"Datastore [none://,rpc://,pipeline://,pipeline://web3,pipeline://simple] (def: ${d.datastore})"),
         ArgString('_', "profile",s"Pipeline profile (def: ${d.profile})"),
+        ArgString('_', "telemetry",s"Telemetry [stdout://60000, stdout://10000?format=csv, file:///metrics-{yyyy}-{MM}-{dd}.csv?format=json, prometheus://, log://info] (def: ${d.telemetry})"),
 
-        ArgString('_', "api.key",s"Cache [none,time://] (def: ${d.apiKey})"),        
+        ArgString('_', "api.key",s"API key suffix (def: ${d.apiKey})"),        
         
         ArgCmd("proxy","Command"),
         ArgCmd("server","Command"),
@@ -67,7 +69,8 @@ object App extends skel.Server {
         // ArgCmd("client","Command"),
         
         ArgParam("<params>","List of parameters (added to --pool)"),
-        ArgLogging()
+        ArgLogging(),
+        ArgConfig()
       ).withExit(1)
     )).withLogging()
 
@@ -75,14 +78,15 @@ object App extends skel.Server {
       host = c.getString("http.host").getOrElse(d.host),
       port = c.getInt("http.port").getOrElse(d.port),
       uri = c.getString("http.uri").getOrElse(d.uri),
-      
+
       datastore = c.getString("datastore").getOrElse(d.datastore),
       profile = c.getString("profile").getOrElse(d.profile),
+      telemetry = c.getString("telemetry").getOrElse(d.telemetry),
 
       apiKey = c.getString("api.key").getOrElse(d.apiKey),
-      
+
       cmd = c.getCmd().getOrElse(d.cmd),
-      
+
       params = c.getParams(),
     )
 
@@ -91,6 +95,13 @@ object App extends skel.Server {
     // Create ActorSystem for pipeline (needed for HttpProcessor)
     implicit val actorSystem: ActorSystem = ActorSystem("ika-pipeline")
     implicit val ec: scala.concurrent.ExecutionContext = actorSystem.dispatcher
+
+    // Create TelemetryStore (it creates and manages Telemetry internally)
+    val telemetryStore = TelemetryStore.fromUri(config.telemetry)
+    telemetryStore.start()
+
+    // Make telemetry globally available
+    implicit val tel: io.syspulse.ika.telemetry.Telemetry = telemetryStore.telemetry
 
     val store = try { config.datastore.split("://").toList match {
 

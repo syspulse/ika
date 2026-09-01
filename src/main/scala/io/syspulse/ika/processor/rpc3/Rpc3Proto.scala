@@ -23,3 +23,5 @@ final case class ProxyRpcBlockResultRes(number:String)
 final case class ProxyRpcBlockRes(jsonrpc:String,result:ProxyRpcBlockResultRes,id:Any)
 
 
+// Solana Request
+//{ "jsonrpc":"2.0","method":"getBlock", "params":[${block},{"encoding":"${encoding}","maxSupportedTransactionVersion":${maxSupportedTransactionVersion},"transactionDetails":"${transactionDetails}","rewards":${rewards} }], "id":${block} }

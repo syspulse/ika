@@ -1,4 +1,4 @@
-package io.syspulse.ika.processor.impl
+package io.syspulse.ika.processor.core
 
 import scala.concurrent.{ExecutionContext, Future}
 import scala.jdk.CollectionConverters._
@@ -49,6 +49,7 @@ final class HeaderProcessor(
           s.putData("http.contentType", v)
         } else {
           val h = RawHeader(k, v)
+          log.debug(s"Add: ${if (isResponse) "response" else "request"}: '${h.name}: ${h.value}'")
           if (isResponse) s.addResponseHeader(h) else s.addRequestHeader(h)
         }
       }
@@ -64,7 +65,7 @@ final class HeaderProcessor(
     val updated = headers.foldLeft(session) { (s, h) =>
       val hn = h.name.toLowerCase(java.util.Locale.ROOT)
       if (removesLower.contains(hn)) {
-        log.debug(s"Removing ${if (isResponse) "response" else "request"} header: ${h.name}")
+        log.debug(s"Remove: ${if (isResponse) "response" else "request"}: '${h.name}: ${h.value}'")
         if (isResponse) s.removeResponseHeader(h.name) else s.removeRequestHeader(h.name)
       } else s
     }
